@@ -30,6 +30,7 @@ class Outcome(str, Enum):
     SKIPPED_VETO = "skipped_veto"
     SKIPPED_ZERO_SIZE = "skipped_zero_size"
     SKIPPED_IN_POSITION = "skipped_in_position"
+    SKIPPED_POLICY = "skipped_policy"
     REJECTED = "rejected"
 
 

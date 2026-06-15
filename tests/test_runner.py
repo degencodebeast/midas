@@ -4,6 +4,7 @@ from magic_agent.models import (
 from magic_agent.executor import PaperExecutor
 from magic_agent.context import CmcContextAdapter
 from magic_agent.runner import check_stops, on_candle
+from magic_agent.policy import PolicyConfig
 
 
 def _setup(direction=Side.LONG, rating="A"):
@@ -57,3 +58,17 @@ def test_on_candle_no_setup_is_noop():
     _, outcome = on_candle(ex, setup_fn=lambda: None,
                            context=CmcContextAdapter(None), candle=Candle(600, 601, 599, 600))
     assert outcome is Outcome.NOOP
+
+
+def test_policy_denial_prevents_open(monkeypatch):
+    ex = PaperExecutor(1000.0)
+    # max_concurrent=1 but force a state with an open position => deny path.
+    # Simplest: a daily-loss kill-switch already tripped.
+    cfg = PolicyConfig(max_daily_loss=50.0)
+    _, outcome = on_candle(
+        ex, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+        policy_config=cfg, realized_pnl_today=-100.0,  # kill-switch tripped
+    )
+    assert outcome is Outcome.SKIPPED_POLICY
+    assert ex.get_position().side is Side.FLAT  # NEVER reached the executor

@@ -40,6 +40,8 @@ def on_candle(
     leverage: float = 1.0,
     log: AgentLog | None = None,
     now: str = "",
+    policy_config: "PolicyConfig | None" = None,
+    realized_pnl_today: float = 0.0,
 ) -> tuple[AgentDecision, Outcome]:
     # 1. Stops first — deterministic risk before anything else.
     pos = executor.get_position()
@@ -72,6 +74,18 @@ def on_candle(
     elif decision.intent is None or decision.intent.qty <= 0:
         outcome = Outcome.SKIPPED_ZERO_SIZE
     else:
+        if policy_config is not None and decision.intent is not None:
+            from magic_agent.policy import PolicyState, run_policies
+            pstate = PolicyState(
+                equity=account.equity,
+                realized_pnl_today=realized_pnl_today,
+                open_positions=0 if executor.get_position().side is Side.FLAT else 1,
+            )
+            verdict = run_policies(decision.intent, pstate, policy_config)
+            if not verdict.approved:
+                if log is not None:
+                    log(decision_record(decision, ctx, Outcome.SKIPPED_POLICY, now=now))
+                return decision, Outcome.SKIPPED_POLICY
         outcome = executor.open_position(decision.intent)
 
     if log is not None:
