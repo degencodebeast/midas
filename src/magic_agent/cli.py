@@ -23,6 +23,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Fraction of equity risked per trade (default 0.01)")
     run.add_argument("--leverage", type=float, default=1.0, help="Leverage (default 1.0)")
     run.set_defaults(func=_cmd_run)
+
+    jt = sub.add_parser("judge-trace", help="Print a one-screen policy proof (zero funds)")
+    jt.set_defaults(func=_cmd_judge_trace)
     return parser
 
 
@@ -55,6 +58,13 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
     print(f"agent ready: symbol={args.symbol} executor={args.executor} "
           f"risk_pct={args.risk_pct} leverage={args.leverage}")
     # The full poll/new-candle-gate loop is added when wiring live data (post-spike).
+
+
+def _cmd_judge_trace(args: argparse.Namespace) -> None:  # pragma: no cover
+    from magic_agent.judge_trace import judge_trace_report
+    from magic_agent.policy import PolicyConfig
+    print(judge_trace_report(PolicyConfig(
+        max_leverage=5.0, max_daily_loss=50.0, max_concurrent=1, require_stop=True)))
 
 
 def main(argv: list[str] | None = None) -> None:  # pragma: no cover
