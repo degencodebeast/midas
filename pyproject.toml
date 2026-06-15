@@ -8,7 +8,9 @@ authors = [
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.137.1",
     "magic-scanner",
+    "uvicorn>=0.49.0",
 ]
 
 [project.scripts]
@@ -23,5 +25,6 @@ magic-scanner = { path = "../trading-scanner", editable = true }
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.0",
 ]
