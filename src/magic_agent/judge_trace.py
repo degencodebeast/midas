@@ -8,8 +8,8 @@ from __future__ import annotations
 from magic_agent.models import Action, ExecutionIntent
 from magic_agent.policy import PolicyState, run_policies, PolicyConfig
 
-_PASS = ExecutionIntent("BNB/USDT", Action.ENTER_LONG, 0.5, 600.0, 588.0, 636.0, 3.0)
-_DENY = ExecutionIntent("BNB/USDT", Action.ENTER_LONG, 0.5, 600.0, 588.0, 636.0, 50.0)  # over leverage
+_PASS = ExecutionIntent("BNB/USDT", Action.ENTER_LONG, 0.5, 600.0, 588.0, 636.0, leverage=3.0)
+_DENY = ExecutionIntent("BNB/USDT", Action.ENTER_LONG, 0.5, 600.0, 588.0, 636.0, leverage=50.0)  # over leverage
 _STATE = PolicyState(equity=1000.0)
 
 
