@@ -76,3 +76,42 @@ def test_build_decision_veto_has_no_intent():
     acct = AccountState(equity=1000.0, available=1000.0)
     d = build_decision(_setup(rating="C"), ContextSnapshot("neutral", "low"), acct)
     assert d.action is Action.HOLD and d.intent is None and d.gate.allow is False
+
+
+from magic_agent.models import Action
+from magic_agent.decision import LlmAdvice, clamp_advice
+
+
+def _allowed():
+    acct = AccountState(equity=1000.0, available=1000.0)
+    return build_decision(_setup(rating="A", regime="risk_on"),
+                          ContextSnapshot("risk_on", "low"), acct)
+
+
+def test_clamp_size_factor_reduces():
+    base = _allowed()
+    out = clamp_advice(base, LlmAdvice(action_hint="take", size_factor=0.5))
+    assert out.intent.qty == base.intent.qty * 0.5
+
+
+def test_clamp_factor_above_one_is_capped_to_baseline():
+    base = _allowed()
+    out = clamp_advice(base, LlmAdvice(action_hint="take", size_factor=5.0))
+    assert out.intent.qty == base.intent.qty  # never increases
+
+
+def test_clamp_negative_factor_floors_to_hold():
+    out = clamp_advice(_allowed(), LlmAdvice(action_hint="take", size_factor=-1.0))
+    assert out.action is Action.HOLD and out.intent is None
+
+
+def test_clamp_wait_forces_hold():
+    out = clamp_advice(_allowed(), LlmAdvice(action_hint="wait", size_factor=1.0))
+    assert out.action is Action.HOLD and out.intent is None
+
+
+def test_clamp_cannot_unveto_a_vetoed_baseline():
+    acct = AccountState(equity=1000.0, available=1000.0)
+    vetoed = build_decision(_setup(rating="C"), ContextSnapshot("neutral", "low"), acct)
+    out = clamp_advice(vetoed, LlmAdvice(action_hint="take", size_factor=1.0))
+    assert out.action is Action.HOLD and out.intent is None  # stays vetoed

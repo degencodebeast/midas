@@ -6,6 +6,8 @@ context, risk) — an LLM may later rank/explain, but never controls these.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, replace as _replace
+
 from magic_agent.models import (
     Action, AccountState, AgentDecision, ContextSnapshot, ExecutionIntent,
     GateVerdict, Setup, Side,
@@ -88,3 +90,30 @@ def build_decision(
         stop_loss=setup.stop_loss, take_profit=setup.take_profit, leverage=leverage,
     )
     return AgentDecision(action, intent, verdict, ref, verdict.reason)
+
+
+@dataclass(frozen=True)
+class LlmAdvice:
+    """Bounded LLM output. ``size_factor`` is clamped to [0, 1] — the LLM can only
+    reduce. ``action_hint`` is "take" or "wait". The LLM never sets entry/stops/direction."""
+    action_hint: str          # "take" | "wait"
+    size_factor: float = 1.0
+    reasoning: str = ""
+
+
+def clamp_advice(baseline: AgentDecision, advice: LlmAdvice) -> AgentDecision:
+    """Apply LLM advice strictly WITHIN the deterministic baseline. The LLM can only
+    reduce size or defer; it can never un-veto, increase size, or change geometry."""
+    if baseline.intent is None or baseline.action is Action.HOLD:
+        return baseline  # cannot act on a vetoed / no-intent baseline
+    if advice.action_hint == "wait":
+        return AgentDecision(Action.HOLD, None, baseline.gate, baseline.setup_ref,
+                             advice.reasoning or "LLM: wait")
+    factor = min(1.0, max(0.0, advice.size_factor))   # size-DOWN only
+    new_qty = baseline.intent.qty * factor
+    if new_qty <= 0:
+        return AgentDecision(Action.HOLD, None, baseline.gate, baseline.setup_ref,
+                             advice.reasoning or "LLM: size->0")
+    intent = _replace(baseline.intent, qty=new_qty)
+    return AgentDecision(baseline.action, intent, baseline.gate, baseline.setup_ref,
+                         advice.reasoning or baseline.reasoning)
