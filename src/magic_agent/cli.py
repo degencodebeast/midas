@@ -169,14 +169,17 @@ def build_serve_app(*, log_path: str, status_provider=None):
     from magic_agent.status import build_status
 
     if status_provider is None:
-        _executor = PaperExecutor(starting_equity=1000.0)
+        _starting_equity = 1000.0
+        _executor = PaperExecutor(starting_equity=_starting_equity)
 
         def _provider() -> dict:
             return build_status(
                 _executor,
+                symbol="BNB/USDT",
                 mode="paper",
                 venue="demo",
                 mark_price=0.0,
+                starting_equity=_starting_equity,
             )
 
         status_provider = _provider
