@@ -13,7 +13,18 @@ from magic_agent.models import (
 @runtime_checkable
 class PerpExecutor(Protocol):
     def get_position(self) -> PositionState: ...
-    def get_account(self, *, mark_price: float) -> AccountState: ...
+
+    def get_account(self, *, mark_price: float) -> AccountState:
+        """Account snapshot at ``mark_price``.
+
+        Contract: ``AccountState.available`` is REALIZED cash only — it must NOT move on
+        unrealized/mark-to-market PnL. The live daily-loss kill-switch in ``run_live``
+        derives ``realized_pnl_today`` from the session delta of ``available``; if a real
+        venue executor reports free margin that fluctuates with mark price, the switch
+        would trip on transient drawdown. Keep ``available`` = realized cash.
+        """
+        ...
+
     def open_position(self, intent: ExecutionIntent) -> Outcome: ...
     def close_position(self, *, mark_price: float) -> Outcome: ...
     def sync(self) -> None: ...
