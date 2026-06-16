@@ -91,6 +91,22 @@ def test_unknown_action_returns_none():
     assert advice is None
 
 
+def test_non_numeric_size_factor_returns_none():
+    # size_factor that float() can't parse → fail-safe None (not an exception).
+    advice = LlmAdvisor(_FakeClient(json.dumps(
+        {"action": "take", "size_factor": "abc", "reasoning": "bad factor"})))(
+        _setup(), _context())
+    assert advice is None
+
+
+def test_non_string_reasoning_is_coerced_to_str():
+    # A non-string reasoning is coerced, not rejected (the actionable fields are valid).
+    advice = LlmAdvisor(_FakeClient(json.dumps(
+        {"action": "take", "size_factor": 1.0, "reasoning": 123})))(_setup(), _context())
+    assert advice is not None
+    assert advice.reasoning == "123"
+
+
 def test_raising_client_returns_none_never_raises():
     def _boom(system_prompt, user_prompt):
         raise RuntimeError("network down")
