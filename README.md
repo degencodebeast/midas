@@ -8,20 +8,23 @@ and returns `None` on failure; policy is fail-closed.
 ## Install (deployable)
 
 A fresh machine needs only this repo checked out — no sibling `trading-scanner`
-checkout is required. The scanner is pulled from a **git-pinned** source.
+checkout is required. The scanner is pulled from a git source **pinned to an
+immutable commit** (`rev = <sha>`), so installs are reproducible and the resolved
+source can't drift to a new branch HEAD under you.
 
 ```bash
-uv sync                       # installs magic-agent + the git-pinned scanner
+uv sync                       # installs magic-agent + the commit-pinned scanner
 uv run magic-agent run --executor paper
 uv run magic-agent serve --host 127.0.0.1 --port 8000
 ```
 
 The scanner (`magic_scanner.scan.scan_symbols`) is declared in `pyproject.toml`
-as a git dependency:
+as a commit-pinned git dependency (bump the `rev` deliberately, then `uv lock`,
+to pick up newer scanner changes):
 
 ```toml
 [tool.uv.sources]
-magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", branch = "build/scanner-core" }
+magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "4ccd1a95b2b32262dbcffd7a920fcba5eb033f54" }
 ```
 
 That repo is **public**, so no GitHub token is needed for a clean VPS install.
@@ -41,7 +44,8 @@ uv sync --extra identity            # or: pip install 'magic-agent[identity]'
 
 The optional dependency is the `bnbagent` SDK
 (<https://github.com/bnb-chain/bnbagent-sdk>; distribution and import package are
-both `bnbagent`). Identity also requires the ERC-8004 env vars
+both `bnbagent`), also pinned to an immutable commit in `pyproject.toml` for
+reproducible identity installs. Identity also requires the ERC-8004 env vars
 (`MAGIC_AGENT_ERC8004_URI`, `MAGIC_AGENT_ERC8004_RPC`, `MAGIC_AGENT_ERC8004_KEY`).
 Note: the production wiring against the SDK's real `ERC8004Agent` API is still
 pending, so identity currently stays `unregistered` even with the extra
@@ -59,7 +63,7 @@ uv pip install -e ../trading-scanner   # point magic_scanner at the local checko
 Alternatively, temporarily swap the committed `[tool.uv.sources]` entry for the
 commented `path = "../trading-scanner", editable = true` form in
 `pyproject.toml` — but do **not** commit that; the committed source must remain
-the git-pin so the deployable install stays self-contained.
+the commit-pinned git source so the deployable install stays self-contained.
 
 ## Shared local state
 
