@@ -22,6 +22,17 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--risk-pct", dest="risk_pct", type=float, default=0.01,
                      help="Fraction of equity risked per trade (default 0.01)")
     run.add_argument("--leverage", type=float, default=1.0, help="Leverage (default 1.0)")
+    # Fail-closed policy flags -> a NON-EMPTY PolicyConfig so the live path always
+    # gates through run_policies (which RAISES on an empty config).
+    run.add_argument("--max-daily-loss", dest="max_daily_loss", type=float, default=50.0,
+                     help="Daily-loss kill-switch (positive USDT; default 50.0)")
+    run.add_argument("--max-leverage", dest="max_leverage", type=float, default=5.0,
+                     help="Max leverage policy cap (default 5.0)")
+    run.add_argument("--require-stop", dest="require_stop", default=True,
+                     action=argparse.BooleanOptionalAction,
+                     help="Reject intents without a stop (default: on)")
+    run.add_argument("--cooldown-seconds", dest="cooldown_seconds", type=float, default=None,
+                     help="Minimum seconds between trades (default: off)")
     run.set_defaults(func=_cmd_run)
 
     jt = sub.add_parser("judge-trace", help="Print a one-screen policy proof (zero funds)")
@@ -55,9 +66,43 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
             # (reconcile chainId 1666 vs 714 before signing on testnet).
             exchange.urls["api"] = "https://fapi.asterdex-testnet.com/fapi"
         executor = AsterRestExecutor(exchange, args.symbol)
-    print(f"agent ready: symbol={args.symbol} executor={args.executor} "
-          f"risk_pct={args.risk_pct} leverage={args.leverage}")
-    # The full poll/new-candle-gate loop is added when wiring live data (post-spike).
+
+    # Fail-closed: a NON-EMPTY PolicyConfig from the CLI flags. run_policies RAISES on
+    # an empty config, so every live entry is gated (this closes the "policy_config
+    # never passed live" gap).
+    from magic_agent.policy import PolicyConfig
+    policy_config = PolicyConfig(
+        max_daily_loss=args.max_daily_loss,
+        max_leverage=args.max_leverage,
+        max_concurrent=1,
+        require_stop=args.require_stop,
+        cooldown_seconds=args.cooldown_seconds,
+    )
+
+    # Real closed-bar feed: fetch OHLCV, DROP the forming bar, return the latest CLOSED
+    # candle + its open-time as the dedupe key. Thin ccxt wiring — the loop logic itself
+    # lives in (unit-tested) run_live; this fetch is intentionally uncovered.
+    import ccxt
+
+    from magic_agent.models import Candle
+
+    market = ccxt.binance()  # public OHLCV source; execution uses `executor` above
+
+    def feed(symbol: str):
+        ohlcv = market.fetch_ohlcv(symbol, timeframe="5m", limit=2)
+        ts, o, h, low, c, _v = ohlcv[-2]  # [-1] is the still-forming bar -> dropped
+        return Candle(o, h, low, c), ts
+
+    from magic_agent.live import run_live
+
+    run_live(
+        executor,
+        gateway=gateway,
+        context=context,
+        feed=feed,
+        symbol=args.symbol,
+        policy_config=policy_config,
+    )
 
 
 def _cmd_judge_trace(args: argparse.Namespace) -> None:  # pragma: no cover
