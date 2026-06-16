@@ -130,9 +130,9 @@ function usePanelMotion(index: number) {
     initial: { opacity: 0, y: 10 },
     animate: { opacity: 1, y: 0 },
     transition: {
-      duration: 0.45,
+      duration: 0.34,
       ease: EASE,
-      delay: 0.05 + index * 0.06,
+      delay: 0.05 + index * 0.05,
     } satisfies Transition,
   };
 }
@@ -180,7 +180,6 @@ function StatusStrip({
   status: StatusData | null;
   offline: boolean;
 }) {
-  const reduce = useReducedMotion();
   const halted = status?.halted ?? false;
   const mode = status?.mode ?? "—";
   const venue = status?.venue ?? "—";
@@ -228,12 +227,8 @@ function StatusStrip({
             </div>
           )}
 
-          {/* Kill-switch pill */}
-          <motion.div
-            animate={
-              reduce ? undefined : { opacity: 1 }
-            }
-            transition={{ duration: 0.4, ease: EASE }}
+          {/* Kill-switch pill — color change handled purely by CSS transition. */}
+          <div
             className={`flex items-center gap-1.5 border px-2.5 py-1 transition-colors duration-500 ${
               halted
                 ? "border-short/50 bg-short/10 text-short"
@@ -244,7 +239,7 @@ function StatusStrip({
             <span className="font-display text-[11px] font-bold uppercase tracking-[0.16em]">
               {halted ? "Halted" : "Armed"}
             </span>
-          </motion.div>
+          </div>
         </div>
       </div>
     </header>
@@ -328,10 +323,14 @@ function AuthorityRow({ d }: { d: Decision }) {
 
   const stamp = terminalStamp(d);
 
-  // The single expressive motion: bar grows from baseline → final on mount.
-  const shouldAnim = !reduce;
+  // The single expressive motion: when the advisor actually trimmed size, the
+  // bar contracts from the full ceiling (100%) down to the clamped final width
+  // on mount. When NOT clamped, filledRatio is already 1 (or the deterministic
+  // fill) — there is nothing to express, so the bar renders at its final width
+  // with no animation. Reduced-motion always renders the final state directly.
+  const animateClamp = clamped && !reduce;
   const barTransition: Transition = {
-    duration: 0.7,
+    duration: 0.45,
     ease: EASE,
     delay: 0.05,
   };
@@ -371,11 +370,9 @@ function AuthorityRow({ d }: { d: Decision }) {
           {/* filled = final qty */}
           <motion.div
             className="absolute inset-y-0 left-0 bg-gold/25"
-            initial={
-              shouldAnim ? { width: "100%" } : false
-            }
+            initial={animateClamp ? { width: "100%" } : false}
             animate={{ width: `${filledRatio * 100}%` }}
-            transition={shouldAnim ? barTransition : { duration: 0 }}
+            transition={animateClamp ? barTransition : { duration: 0 }}
           >
             <span className="absolute inset-y-0 right-0 w-px bg-gold" />
           </motion.div>
@@ -457,7 +454,7 @@ function DecisionFeed({ decisions }: { decisions: Decision[] }) {
           Waiting for the agent to start.
         </p>
       ) : (
-        <div className="-mx-4 -mb-4 divide-y divide-line">
+        <div className="feed-scroll -mx-4 -mb-4 max-h-[60vh] divide-y divide-line overflow-y-auto">
           {decisions.map((d, i) => (
             <AuthorityRow key={rowKey(d, i)} d={d} />
           ))}
@@ -505,8 +502,9 @@ function PerformancePanel({
 }) {
   const currency = status?.currency ?? "";
 
-  // Win-rate: opened (won) vs actionable (decisions that resolved to a trade
-  // attempt — opened or closed). Best-effort from the log.
+  // Fill rate: opened vs actionable (decisions that resolved to a trade
+  // attempt — opened or closed). This is NOT win/loss — a closed trade may be a
+  // loss — so it is labeled "Fill rate", not "Win rate". Best-effort from the log.
   const actionable = decisions.filter((d) => {
     const o = (d.outcome ?? "").toLowerCase();
     return o === "opened" || o === "closed";
@@ -514,7 +512,7 @@ function PerformancePanel({
   const opened = decisions.filter(
     (d) => (d.outcome ?? "").toLowerCase() === "opened",
   );
-  const winRate =
+  const fillRate =
     actionable.length > 0 ? opened.length / actionable.length : null;
 
   const equity = status?.equity;
@@ -543,11 +541,11 @@ function PerformancePanel({
             value={status?.available != null ? fmtNum(status.available, 2) : "—"}
           />
           <Metric
-            label="Win rate"
+            label="Fill rate"
             value={
-              winRate != null ? (
+              fillRate != null ? (
                 <>
-                  {(winRate * 100).toFixed(0)}
+                  {(fillRate * 100).toFixed(0)}
                   <span className="text-muted">%</span>
                   <span className="ml-1.5 text-[11px] text-muted">
                     {opened.length}/{actionable.length}
