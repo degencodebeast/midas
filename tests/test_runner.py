@@ -137,3 +137,27 @@ def test_on_candle_advisor_none_matches_deterministic_baseline():
     assert records[0]["baseline_qty"] is None
     assert records[0]["llm_size_factor"] is None
     assert records[0]["llm_action_hint"] is None
+
+
+def test_on_candle_advisor_abstains_keeps_deterministic_qty_and_logs_baseline():
+    # An advisor that is WIRED but returns None (abstains) must not alter the
+    # deterministic decision: baseline_qty is still captured (advisor present),
+    # but llm_size_factor/llm_action_hint stay None and the open proceeds at full size.
+    ex0 = PaperExecutor(1000.0)
+    on_candle(ex0, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+              candle=Candle(600, 601, 599, 600))
+    baseline_qty = ex0.get_position().size
+
+    records: list[dict] = []
+    ex = PaperExecutor(1000.0)
+    _, outcome = on_candle(
+        ex, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+        advisor=lambda setup, ctx: None,  # advisor abstains
+        log=records.append,
+    )
+    assert outcome is Outcome.OPENED
+    assert ex.get_position().size == baseline_qty   # full deterministic size, unclamped
+    assert records[0]["baseline_qty"] == baseline_qty
+    assert records[0]["llm_size_factor"] is None
+    assert records[0]["llm_action_hint"] is None
