@@ -15,8 +15,10 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from magic_agent.context import CmcContextAdapter
+from magic_agent.decision import LlmAdvice, RISK_PCT_DEFAULT
 from magic_agent.executor import PerpExecutor
 from magic_agent.log import AgentLog
+from magic_agent.models import ContextSnapshot, Setup
 from magic_agent.policy import PolicyConfig
 from magic_agent.runner import on_candle
 
@@ -29,7 +31,9 @@ def run_live(
     feed: Callable[[str], tuple],
     symbol: str,
     policy_config: PolicyConfig,
-    advisor: Callable | None = None,
+    risk_pct: float = RISK_PCT_DEFAULT,
+    leverage: float = 1.0,
+    advisor: Callable[[Setup, ContextSnapshot], LlmAdvice | None] | None = None,
     log: AgentLog | None = None,
     now_fn: Callable[[], str] | None = None,
     realized_pnl_today: float = 0.0,
@@ -53,7 +57,9 @@ def run_live(
             break
 
         # New-closed-candle gate: dedupe on ts so each closed bar runs exactly once.
-        if last_ts is not None and ts <= last_ts:
+        # ``ts is None`` is a feed "no candle this poll" signal (e.g. a transient fetch
+        # error) — skip without advancing ``last_ts``.
+        if ts is None or (last_ts is not None and ts <= last_ts):
             continue
         last_ts = ts
 
@@ -64,6 +70,8 @@ def run_live(
             setup_fn=setup_fn,
             context=context,
             candle=candle,
+            risk_pct=risk_pct,
+            leverage=leverage,
             policy_config=policy_config,
             advisor=advisor,
             log=log,

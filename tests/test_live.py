@@ -115,3 +115,58 @@ def test_run_live_forwards_policy_config_into_on_candle():
     assert count == 1
     assert ex.get_position().side is Side.FLAT  # policy blocked the open
     assert records[0]["outcome"] == Outcome.SKIPPED_POLICY.value
+
+
+def test_run_live_forwards_risk_pct_and_leverage_into_on_candle():
+    # risk_pct/leverage must reach on_candle (CLI flags were silently no-op'd before).
+    captured: list[dict] = []
+
+    def spy_on_candle(executor, **kwargs):
+        captured.append(kwargs)
+        return None, None
+
+    import magic_agent.live as live_mod
+
+    orig = live_mod.on_candle
+    live_mod.on_candle = spy_on_candle
+    try:
+        run_live(
+            PaperExecutor(1000.0),
+            gateway=_FakeGateway(),
+            context=CmcContextAdapter(None),
+            feed=_fake_feed([(Candle(600, 601, 599, 600), 1000)]),
+            symbol="BNB/USDT",
+            policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+            risk_pct=0.005,
+            leverage=5.0,
+            max_iters=1,
+        )
+    finally:
+        live_mod.on_candle = orig
+
+    assert captured[0]["risk_pct"] == 0.005
+    assert captured[0]["leverage"] == 5.0
+
+
+def test_run_live_skips_none_ts_without_advancing_gate():
+    # A feed returning (None, None) (e.g. a transient fetch error) is skipped and does
+    # NOT advance last_ts, so a subsequent real candle still processes.
+    ex = PaperExecutor(1000.0)
+    gw = _FakeGateway(_setup(rating="C"))
+    records: list[dict] = []
+    pairs = [
+        (None, None),                         # transient error -> skipped
+        (Candle(600, 601, 599, 600), 1000),   # real candle -> processed
+    ]
+    count = run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed(pairs),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        log=records.append,
+        max_iters=2,
+    )
+    assert count == 1
+    assert len(records) == 1

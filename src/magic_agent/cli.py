@@ -82,14 +82,23 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
     # Real closed-bar feed: fetch OHLCV, DROP the forming bar, return the latest CLOSED
     # candle + its open-time as the dedupe key. Thin ccxt wiring — the loop logic itself
     # lives in (unit-tested) run_live; this fetch is intentionally uncovered.
+    import time
+
     import ccxt
 
     from magic_agent.models import Candle
 
-    market = ccxt.binance()  # public OHLCV source; execution uses `executor` above
+    # enableRateLimit paces fetch_ohlcv so the poll loop can't hammer the public endpoint.
+    market = ccxt.binance({"enableRateLimit": True})  # OHLCV source; execution uses `executor`
 
     def feed(symbol: str):
-        ohlcv = market.fetch_ohlcv(symbol, timeframe="5m", limit=2)
+        # The unbounded live loop polls back-to-back; sleep + rate-limit set the cadence,
+        # and a transient network error must not kill the loop (skip this poll instead).
+        time.sleep(15)
+        try:
+            ohlcv = market.fetch_ohlcv(symbol, timeframe="5m", limit=2)
+        except ccxt.NetworkError:
+            return None, None  # gated out by the <= last_ts check (None never advances)
         ts, o, h, low, c, _v = ohlcv[-2]  # [-1] is the still-forming bar -> dropped
         return Candle(o, h, low, c), ts
 
@@ -102,6 +111,8 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
         feed=feed,
         symbol=args.symbol,
         policy_config=policy_config,
+        risk_pct=args.risk_pct,
+        leverage=args.leverage,
     )
 
 
