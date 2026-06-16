@@ -1,0 +1,77 @@
+@import "tailwindcss";
+
+/* ── Design tokens ─────────────────────────────────────────────────────────── */
+:root {
+  --color-ink:      #0E1217;
+  --color-surface:  #161C24;
+  --color-surface2: #1D2530;
+  --color-line:     #28323F;
+  --color-text:     #E6EBF2;
+  --color-muted:    #8A97A8;
+  --color-gold:     #E8B14C;
+  --color-long:     #5FB88D;
+  --color-short:    #D9776A;
+  --color-ai:       #6E8BB8;
+}
+
+/* ── Tailwind theme wiring ─────────────────────────────────────────────────── */
+@theme inline {
+  --color-ink:      var(--color-ink);
+  --color-surface:  var(--color-surface);
+  --color-surface2: var(--color-surface2);
+  --color-line:     var(--color-line);
+  --color-text:     var(--color-text);
+  --color-muted:    var(--color-muted);
+  --color-gold:     var(--color-gold);
+  --color-long:     var(--color-long);
+  --color-short:    var(--color-short);
+  --color-ai:       var(--color-ai);
+
+  --font-display: var(--font-display);
+  --font-mono:    var(--font-mono);
+  --font-sans:    var(--font-sans);
+}
+
+/* ── Base ──────────────────────────────────────────────────────────────────── */
+body {
+  background: var(--color-ink);
+  color: var(--color-text);
+  font-family: var(--font-sans), system-ui, sans-serif;
+}
+
+/* Tabular figures for aligned numeric data */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Visible keyboard focus — gold, instrument-grade, never removed */
+:focus-visible {
+  outline: 2px solid var(--color-gold);
+  outline-offset: 2px;
+}
+
+/* Thin, instrument-grade scrollbar for the capped decision feed */
+.feed-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+.feed-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.feed-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.feed-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-line);
+  border-radius: 3px;
+}
+
+/* Respect reduced motion globally */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

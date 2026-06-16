@@ -1,0 +1,84 @@
+# deploy/nginx.conf.example
+# Nginx reverse-proxy configuration for magic-agent on a VPS.
+#
+# Architecture:
+#   Internet → nginx (TLS, public :443) → /api/* → magic-agent-serve (127.0.0.1:8000)
+#                                        → /*     → magic-agent-web   (127.0.0.1:3000)
+#
+# ONLY nginx is public. Both magic-agent-serve and magic-agent-web bind to
+# 127.0.0.1 and are NOT reachable directly from the internet.
+#
+# To obtain a free TLS certificate with Let's Encrypt / certbot:
+#   sudo apt install certbot python3-certbot-nginx
+#   sudo certbot --nginx -d your-domain.example.com
+# Certbot will fill in ssl_certificate / ssl_certificate_key automatically.
+#
+# Usage:
+#   sudo cp deploy/nginx.conf.example /etc/nginx/sites-available/magic-agent
+#   # Edit the server_name and certificate paths below.
+#   sudo ln -s /etc/nginx/sites-available/magic-agent /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+
+# Redirect plain HTTP to HTTPS.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name your-domain.example.com;
+
+    # Allow Let's Encrypt ACME challenge through.
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# HTTPS server — TLS termination + proxy.
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name your-domain.example.com;
+
+    # Replace with paths provided by certbot (or your own certificate).
+    ssl_certificate     /etc/letsencrypt/live/your-domain.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your-domain.example.com/privkey.pem;
+
+    # Recommended TLS settings (certbot may add these automatically).
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    # ---------------------------------------------------------------------------
+    # /api/* → magic-agent-serve (read-only FastAPI, 127.0.0.1:8000)
+    # ---------------------------------------------------------------------------
+    # magic-agent-serve MUST be bound to 127.0.0.1 (see magic-agent-serve.service).
+    # The CLI default is 0.0.0.0 — the systemd unit overrides this with
+    # --host 127.0.0.1 to keep the API private (REQ-015).
+    location /api/ {
+        proxy_pass         http://127.0.0.1:8000/api/;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+
+        # /api/status and /api/decisions are plain JSON GETs (no SSE today); a modest
+        # read timeout is all they need.
+        proxy_read_timeout 120s;
+    }
+
+    # ---------------------------------------------------------------------------
+    # /* → magic-agent-web (Next.js dashboard, 127.0.0.1:3000)
+    # ---------------------------------------------------------------------------
+    location / {
+        proxy_pass         http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade           $http_upgrade;
+        proxy_set_header   Connection        "upgrade";
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+    }
+}

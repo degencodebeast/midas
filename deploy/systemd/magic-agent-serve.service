@@ -1,0 +1,46 @@
+# magic-agent-serve.service — read-only API server (FastAPI)
+#
+# CRITICAL — shared working directory:
+#   magic-agent serve READS .magic_agent/status.json and .magic_agent/decisions.jsonl.
+#   magic-agent run WRITES those same files.
+#   Both services MUST share the same WorkingDirectory (/opt/midas).
+#   If WorkingDirectory differs, /api/status and /api/decisions will return stale
+#   or missing data — a silent footgun.
+#
+# The API binds to 127.0.0.1:8000 (NOT 0.0.0.0). The CLI default is 0.0.0.0,
+# but on a VPS the API must be private and reachable only through the reverse
+# proxy (REQ-015). --host 127.0.0.1 is mandatory here.
+#
+# Startup order: magic-agent-run and magic-agent-serve (any order), then
+# magic-agent-web, then the reverse proxy.
+
+[Unit]
+Description=magic-agent read-only API (FastAPI / uvicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Replace 'midas' with the OS user that owns /opt/midas (never run as root).
+User=midas
+
+# MUST match WorkingDirectory of magic-agent-run.service so both processes
+# share the same .magic_agent/ state directory.
+WorkingDirectory=/opt/midas
+
+# Load environment variables. Copy deploy/.env.example to /opt/midas/.env.
+EnvironmentFile=/opt/midas/.env
+
+# --host 127.0.0.1 is REQUIRED on a VPS so the API binds privately (REQ-015).
+# The CLI default (--host 0.0.0.0) would expose the API directly to the internet.
+# Adjust the path to uv if it is installed elsewhere (e.g. ~/.local/bin/uv).
+ExecStart=/usr/local/bin/uv run magic-agent serve --host 127.0.0.1 --port 8000
+
+Restart=on-failure
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=magic-agent-serve
+
+[Install]
+WantedBy=multi-user.target

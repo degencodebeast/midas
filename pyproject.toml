@@ -1,27 +1,49 @@
 [project]
 name = "magic-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "Bounded autonomous ICT/SMC trading agent (BNB Track 1)"
 readme = "README.md"
 authors = [
     { name = "degencodebeast", email = "newfirereloaded@proton.me" }
 ]
 requires-python = ">=3.11"
 dependencies = [
+    "anthropic>=0.109.2",
+    "fastapi>=0.137.1",
     "magic-scanner",
+    "uvicorn>=0.49.0",
 ]
 
 [project.scripts]
-magic-agent = "magic_agent:main"
+magic-agent = "magic_agent.cli:main"
+
+[project.optional-dependencies]
+# ERC-8004 on-chain identity is OPTIONAL. Without it, the agent runs normally
+# and the dashboard shows "unregistered" (see cli._resolve_agent_id).
+# Install with: `uv sync --extra identity` or `pip install 'magic-agent[identity]'`.
+# Distribution/import package is `bnbagent` (https://github.com/bnb-chain/bnbagent-sdk).
+# Pinned to an IMMUTABLE commit (not a floating branch/HEAD) so fresh installs are
+# reproducible; bump the sha deliberately when you want a newer SDK.
+identity = ["bnbagent @ git+https://github.com/bnb-chain/bnbagent-sdk@8a65004c4969bb1f16feaa4adf4f422ac870cf10"]
 
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-magic-scanner = { path = "../trading-scanner", editable = true }
+# Deployable (committed) source: scanner pinned to an IMMUTABLE commit so `midas`
+# installs standalone on a fresh VPS with no sibling checkout AND the resolved source
+# can't drift under you (a `branch =` ref floats to HEAD on every re-lock — a `rev =`
+# sha does not). The scanner repo is PUBLIC — no token needed. Bump this sha
+# deliberately to pick up scanner changes (then re-run `uv lock`).
+magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "4ccd1a95b2b32262dbcffd7a920fcba5eb033f54" }
+# Local-dev override (editable sibling scanner): do NOT commit this uncommented.
+# After `uv sync`, run `uv pip install -e ../trading-scanner` to point at the local
+# checkout, or temporarily swap the source above to:
+#   magic-scanner = { path = "../trading-scanner", editable = true }
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.0",
 ]
