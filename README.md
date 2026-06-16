@@ -51,6 +51,31 @@ Note: the production wiring against the SDK's real `ERC8004Agent` API is still
 pending, so identity currently stays `unregistered` even with the extra
 installed — this is intentional and honest, not a silent failure.
 
+### Live context (CMC)
+
+The agent can wire a **real** CoinMarketCap client into the live context path, gated
+on env config:
+
+- `MAGIC_AGENT_CMC_API_KEY` — CMC API key (required to enable the client).
+- `MAGIC_AGENT_CMC_BASE_URL` — optional base-URL override (defaults to
+  `https://pro-api.coinmarketcap.com`).
+
+**Configured** (key present): a real authenticated client is wired in. On each context
+fetch it issues one GET (10s timeout) to the CMC Fear & Greed endpoint and **logs** the
+raw reading (`magic_agent.cmc` logger, INFO). Any fetch error or timeout degrades the
+context to `status="unavailable"` (the loop never blocks on CMC). However, this runs in
+**observe-only** mode — it does
+**not** gate trades. The client deliberately feeds the decision gate a non-vetoing
+`regime="neutral", risk_flag="low"` context regardless of the Fear & Greed value. The
+mapping from a CMC reading to a `regime`/`risk_flag` veto is a deliberate, **deferred**
+trading-policy decision to be validated against real observations before it can influence
+sizing or vetoes. So today: CMC is fetched and surfaced, the deterministic scanner path
+remains authoritative, and CMC does **not** yet gate trades.
+
+**Unconfigured** (no key): the factory returns `None`, the context adapter degrades
+honestly to `status="unavailable"`, and the deterministic scanner path stands on its own
+(unavailable context is a full passthrough — no veto, no boost).
+
 ### Local dev: editable sibling scanner
 
 Workspace devs who want the local editable scanner can override after sync:

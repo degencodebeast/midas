@@ -8,14 +8,18 @@ is the default executor so a bare ``magic-agent run`` never touches funds.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
-from typing import Callable
+from typing import Any, Callable
 
 from magic_agent.status_store import DEFAULT_STATUS_PATH
 
 # Default model when MAGIC_AGENT_LLM_MODEL is unset. A current Claude 4-class id
 # (verified against the live anthropic-sdk-python ModelParam list via context7).
 DEFAULT_LLM_MODEL = "claude-sonnet-4-6"
+
+# Default CMC API base. Overridable via MAGIC_AGENT_CMC_BASE_URL.
+DEFAULT_CMC_BASE_URL = "https://pro-api.coinmarketcap.com"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +129,80 @@ def _default_advisor_factory(
     return LlmAdvisor(client)
 
 
+def _make_cmc_client(
+    *, api_key: str, base_url: str = DEFAULT_CMC_BASE_URL, fetch: Callable[[], dict] | None = None,
+) -> Callable[[str], dict[str, Any]]:
+    """Build the REAL env-gated CMC client callable — in OBSERVE-ONLY mode.
+
+    Returns ``client(symbol) -> {"regime","risk_flag"}``. On each call it makes ONE
+    authenticated GET to the CMC Fear & Greed endpoint, LOGS the raw reading, and then
+    returns a DELIBERATELY NON-VETOING observe-only context (``regime="neutral"``,
+    ``risk_flag="low"``) so the gate sees ``status="ok"`` full passthrough.
+
+    IMPORTANT: the raw Fear & Greed reading is OBSERVED + LOGGED but is intentionally
+    NOT mapped to a regime/risk_flag veto in this phase. Inventing that veto mapping is
+    a trading-policy decision to be validated against real observations later; the
+    deterministic scanner path stays authoritative. Do NOT add a mapping here.
+
+    ``fetch`` is an injectable zero-arg callable returning the parsed CMC JSON dict; it
+    defaults to a stdlib ``urllib.request`` GET (no new runtime dependency). Tests inject
+    a fake ``fetch`` to exercise the observe-only mapping + logging with ZERO network.
+    """
+    import json
+    import urllib.request
+
+    log = logging.getLogger("magic_agent.cmc")
+    url = base_url.rstrip("/") + "/v3/fear-and-greed/latest"
+
+    def _real_fetch() -> dict:  # pragma: no cover - network (no API key in unit tests)
+        # timeout is REQUIRED: this runs inside the live poll loop, and a hung socket
+        # never raises — without a timeout a stalled CMC connection would freeze the
+        # trading loop indefinitely (the adapter's try/except catches errors, NOT hangs).
+        # On timeout/error urlopen raises -> CmcContextAdapter degrades to "unavailable".
+        req = urllib.request.Request(url, headers={"X-CMC_PRO_API_KEY": api_key})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    _fetch = fetch if fetch is not None else _real_fetch
+
+    def _client(symbol: str) -> dict[str, Any]:
+        raw = _fetch()
+        data = raw["data"]
+        value = data["value"]
+        classification = data["value_classification"]
+        # Surface the real CMC output — observe-only: logged, NOT used to gate.
+        log.info("CMC observe-only: fear_greed=%s (%s)", value, classification)
+        # Observe-only: deliberately non-vetoing. The reading above is NOT mapped to a
+        # regime/risk_flag veto in this phase (deferred trading-policy decision).
+        return {"regime": "neutral", "risk_flag": "low"}
+
+    return _client
+
+
+def _default_cmc_client_factory(
+    *, client_maker: Callable[..., Callable[[str], dict[str, Any]]] = _make_cmc_client,
+):
+    """Construct the REAL env-gated CMC client from environment config.
+
+    Config (env):
+      * ``MAGIC_AGENT_CMC_API_KEY`` — CMC API key. If UNSET/empty, returns ``None``
+        (→ ``CmcContextAdapter(client=None)`` → ``status="unavailable"``; honest
+        "CMC not configured"). This is the SAFE default.
+      * ``MAGIC_AGENT_CMC_BASE_URL`` — optional base URL override.
+
+    When a key is present, returns ``client_maker(api_key=..., base_url=...)`` — a real
+    observe-only client (fetches + logs the F&G reading, returns non-vetoing neutral/low).
+    ``client_maker`` is injectable so tests assert the wiring WITHOUT any network call.
+    """
+    api_key = os.environ.get("MAGIC_AGENT_CMC_API_KEY", "")
+    if not api_key:
+        # No credentials → no client → context degrades to "unavailable" (safe default).
+        return None
+
+    base_url = os.environ.get("MAGIC_AGENT_CMC_BASE_URL") or DEFAULT_CMC_BASE_URL
+    return client_maker(api_key=api_key, base_url=base_url)
+
+
 def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed,
                      advisor_factory=_default_advisor_factory,
                      agent_id: str | None = None) -> dict:
@@ -219,7 +297,12 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
     from magic_agent.context import CmcContextAdapter
     from magic_agent.executor import PaperExecutor
 
-    context = CmcContextAdapter(client=None)  # TODO(cli): wire CMC client per spike findings
+    # Real env-gated CMC client in OBSERVE-ONLY mode: when MAGIC_AGENT_CMC_API_KEY is
+    # set it fetches + LOGS the live Fear & Greed reading each context fetch but feeds
+    # the gate a deliberately non-vetoing neutral/low context (the F&G->veto mapping is
+    # a deferred trading-policy decision). Unconfigured -> factory returns None ->
+    # adapter degrades to "unavailable" (identical safe behavior as before).
+    context = CmcContextAdapter(client=_default_cmc_client_factory())
     from magic_agent.scanner_gateway import ScannerGateway
     gateway = ScannerGateway()                # sole scanner seam; setup_fn = lambda: gateway.scan(args.symbol)
     if args.executor == "paper":
