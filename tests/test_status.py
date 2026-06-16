@@ -85,6 +85,34 @@ class TestFlatExecutor:
         assert "currency" in result
         assert result["currency"] == "USDT"
 
+    def test_new_contract_keys_present_with_defaults(self):
+        # daily_loss/max_daily_loss/agent_id must ALWAYS be emitted (None when unset).
+        executor = PaperExecutor()
+        result = build_status(executor, symbol="BNB/USDT", mode="paper", venue="binance", mark_price=300.0, starting_equity=1000.0)
+        assert "daily_loss" in result
+        assert "max_daily_loss" in result
+        assert "agent_id" in result
+        assert result["daily_loss"] is None
+        assert result["max_daily_loss"] is None
+        assert result["agent_id"] is None
+
+    def test_new_contract_keys_reflect_passed_values(self):
+        executor = PaperExecutor()
+        result = build_status(
+            executor,
+            symbol="BNB/USDT",
+            mode="paper",
+            venue="binance",
+            mark_price=300.0,
+            starting_equity=1000.0,
+            daily_loss=25.0,
+            max_daily_loss=50.0,
+            agent_id="0xDEADBEEF",
+        )
+        assert result["daily_loss"] == pytest.approx(25.0)
+        assert result["max_daily_loss"] == pytest.approx(50.0)
+        assert result["agent_id"] == "0xDEADBEEF"
+
     def test_realized_and_open_pnl_zero_when_flat(self):
         executor = PaperExecutor(starting_equity=1000.0)
         result = build_status(executor, symbol="BNB/USDT", mode="paper", venue="binance", mark_price=300.0, starting_equity=1000.0)
@@ -221,6 +249,25 @@ class TestJsonSerializable:
         serialized = json.dumps(result)
         parsed = json.loads(serialized)
         assert parsed["positions"][0]["side"] == "long"
+
+    def test_new_contract_keys_jsonable(self):
+        executor = PaperExecutor()
+        result = build_status(
+            executor,
+            symbol="BNB/USDT",
+            mode="paper",
+            venue="binance",
+            mark_price=300.0,
+            starting_equity=1000.0,
+            daily_loss=12.5,
+            max_daily_loss=50.0,
+            agent_id="0xabc123",
+        )
+        serialized = json.dumps(result)
+        parsed = json.loads(serialized)
+        assert parsed["daily_loss"] == pytest.approx(12.5)
+        assert parsed["max_daily_loss"] == pytest.approx(50.0)
+        assert parsed["agent_id"] == "0xabc123"
 
     def test_no_enum_objects_in_result(self):
         """Verify that no value in the result (including nested) is a Side enum."""

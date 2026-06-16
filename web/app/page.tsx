@@ -110,11 +110,12 @@ function signClass(v: number | null | undefined): string {
   return v > 0 ? "text-long" : "text-short";
 }
 
-// Stable short agent-id placeholder (ERC-8004 identity nod).
+// ERC-8004 identity badge text. Honest: when no on-chain id is reported the badge
+// reads "unregistered" — never a fabricated placeholder.
 function shortAgentId(raw?: string): string {
   if (raw && raw.length > 10) return `${raw.slice(0, 6)}…${raw.slice(-4)}`;
   if (raw) return raw;
-  return "0xMIDAS…8004";
+  return "unregistered";
 }
 
 // ── Motion primitives ────────────────────────────────────────────────────────

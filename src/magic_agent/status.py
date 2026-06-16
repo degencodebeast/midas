@@ -17,6 +17,9 @@ def build_status(
     mark_price: float,
     starting_equity: float,
     halted: bool = False,
+    daily_loss: float | None = None,
+    max_daily_loss: float | None = None,
+    agent_id: str | None = None,
 ) -> dict:
     """Return a JSON-serialisable status dict matching the dashboard contract.
 
@@ -39,14 +42,24 @@ def build_status(
         The session's starting equity (realized cash baseline). Used to derive
         ``realized_pnl`` as ``account.available - starting_equity``.
     halted:
-        Whether the agent loop is currently halted.
+        Whether the agent loop is currently halted (the daily-loss kill-switch
+        state). Surfaced as the dashboard's kill-switch pill.
+    daily_loss:
+        Current realized loss magnitude for the session (``0.0`` when in profit;
+        ``None`` when not reported). Backs the dashboard's daily-loss meter.
+    max_daily_loss:
+        The daily-loss kill-switch cap (``None`` when no cap is configured).
+    agent_id:
+        The ERC-8004 on-chain agent identity (``None`` when unregistered — the
+        dashboard then shows an honest "unregistered" badge, never a fake id).
 
     Returns
     -------
     dict
         JSON-able dict with keys: ``mode``, ``venue``, ``halted``,
         ``equity``, ``available``, ``currency``, ``realized_pnl``,
-        ``open_pnl``, ``positions``.
+        ``open_pnl``, ``daily_loss``, ``max_daily_loss``, ``agent_id``,
+        ``positions``.
 
         ``realized_pnl`` = ``account.available - starting_equity`` (realized
         cash delta); ``open_pnl`` = ``account.equity - account.available``
@@ -88,5 +101,8 @@ def build_status(
         "currency": account.currency,
         "realized_pnl": account.available - starting_equity,
         "open_pnl": account.equity - account.available,
+        "daily_loss": daily_loss,
+        "max_daily_loss": max_daily_loss,
+        "agent_id": agent_id,
         "positions": positions,
     }

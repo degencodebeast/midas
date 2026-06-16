@@ -297,6 +297,91 @@ def test_run_live_writes_status_snapshot_per_candle(tmp_path):
     assert "positions" in snap
 
 
+def test_run_live_snapshot_reflects_real_killswitch_when_loss_exceeds_cap(tmp_path):
+    # P1.7-1: the snapshot's `halted` must reflect the REAL daily-loss kill-switch state,
+    # not a hardcoded False. Executor available drops 1000 -> 900 (a $100 realized loss)
+    # past the max_daily_loss=50 cap on the second candle -> snapshot halted == True,
+    # daily_loss == 100, max_daily_loss == 50.
+    import json
+
+    ex = _FakeExecutor([1000.0, 900.0])
+    gw = _FakeGateway(_setup())
+    snapshot_path = tmp_path / "status.json"
+    pairs = [
+        (Candle(600, 601, 599, 600), 1000),
+        (Candle(601, 602, 600, 601), 2000),
+    ]
+    count = run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed(pairs),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        snapshot_path=str(snapshot_path),
+        mode="paper",
+        venue="binance",
+        max_iters=2,
+    )
+    assert count == 2
+    snap = json.loads(snapshot_path.read_text())
+    assert snap["halted"] is True
+    assert snap["daily_loss"] > 0
+    assert snap["daily_loss"] == 100.0
+    assert snap["max_daily_loss"] == 50.0
+
+
+def test_run_live_snapshot_no_loss_is_not_halted(tmp_path):
+    # No realized loss -> snapshot halted == False, daily_loss == 0.0, max_daily_loss == cap.
+    import json
+
+    ex = PaperExecutor(1000.0)
+    gw = _FakeGateway(_setup(rating="C"))  # vetoed -> stays flat
+    snapshot_path = tmp_path / "status.json"
+    pairs = [(Candle(600, 601, 599, 600), 1000)]
+    run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed(pairs),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        snapshot_path=str(snapshot_path),
+        mode="paper",
+        venue="binance",
+        max_iters=1,
+    )
+    snap = json.loads(snapshot_path.read_text())
+    assert snap["halted"] is False
+    assert snap["daily_loss"] == 0.0
+    assert snap["max_daily_loss"] == 50.0
+
+
+def test_run_live_forwards_agent_id_into_snapshot(tmp_path):
+    # P1.7-1: a given agent_id is threaded through into the snapshot's identity field.
+    import json
+
+    ex = PaperExecutor(1000.0)
+    gw = _FakeGateway(_setup(rating="C"))
+    snapshot_path = tmp_path / "status.json"
+    pairs = [(Candle(600, 601, 599, 600), 1000)]
+    run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed(pairs),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        snapshot_path=str(snapshot_path),
+        agent_id="0x1234567890abcdef",
+        mode="paper",
+        venue="binance",
+        max_iters=1,
+    )
+    snap = json.loads(snapshot_path.read_text())
+    assert snap["agent_id"] == "0x1234567890abcdef"
+
+
 def test_run_live_no_snapshot_path_writes_nothing(tmp_path):
     # Backward compatible: snapshot_path=None (default) → no file written.
     ex = PaperExecutor(1000.0)

@@ -126,7 +126,8 @@ def _default_advisor_factory(
 
 
 def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed,
-                     advisor_factory=_default_advisor_factory) -> dict:
+                     advisor_factory=_default_advisor_factory,
+                     agent_id: str | None = None) -> dict:
     """Assemble the kwargs for ``run_live(...)`` from parsed CLI ``args`` + the
     injected execution units (``executor``/``gateway``/``context``/``feed``).
 
@@ -135,6 +136,10 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
     ``log=AgentLog(args.log)`` — the previously-missing decision log that feeds the
     dashboard's ``/api/decisions`` endpoint. No network here; only the real ccxt
     feed/executor *construction* (in ``_cmd_run``) stays uncovered.
+
+    ``agent_id`` (the ERC-8004 on-chain identity, ``None`` when unregistered) is threaded
+    through into ``run_live`` so the live status snapshot carries a real id or honest
+    ``None`` — never a fabricated placeholder.
     """
     from magic_agent.log import AgentLog
     from magic_agent.policy import PolicyConfig
@@ -174,7 +179,42 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
         "snapshot_path": DEFAULT_STATUS_PATH,
         "mode": "paper" if args.executor == "paper" else "live",
         "venue": "binance",  # OHLCV feed source
+        # P1.7-1: ERC-8004 identity (None when unregistered — never a fabricated id).
+        # Surfaced in the live status snapshot so the dashboard badge is honest.
+        "agent_id": agent_id,
     }
+
+
+def _resolve_agent_id() -> str | None:  # pragma: no cover - on-chain wiring
+    """Resolve the ERC-8004 on-chain agent id, or None when unregistered.
+
+    Honest by construction: when no registrar/env is configured we return None
+    (the dashboard then shows "unregistered") — we NEVER fabricate a placeholder.
+    The actual on-chain ``register()`` is left uncovered (no chain in unit tests).
+    """
+    agent_uri = os.environ.get("MAGIC_AGENT_ERC8004_URI")
+    if not agent_uri:
+        return None  # not configured -> unregistered, honestly
+    try:
+        from magic_agent.identity import Erc8004Identity
+
+        # The concrete registrar (bnbagent-sdk Erc8004Contract) is constructed here
+        # from env; absence/any error -> unregistered (None), never a fake id.
+        from bnbagent_sdk import Erc8004Contract  # type: ignore
+
+        registrar = Erc8004Contract(
+            rpc_url=os.environ["MAGIC_AGENT_ERC8004_RPC"],
+            private_key=os.environ["MAGIC_AGENT_ERC8004_KEY"],
+        )
+        identity = Erc8004Identity(
+            registrar,
+            agent_uri=agent_uri,
+            metadata={"name": "MIDAS", "track": "BNB-1"},
+        )
+        return str(identity.register())
+    except Exception:
+        # On-chain registration is best-effort: any failure -> unregistered, not a crash.
+        return None
 
 
 def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
@@ -229,8 +269,13 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
 
     from magic_agent.live import run_live
 
+    # ERC-8004 identity: real agent id when configured/registered, else None
+    # (the dashboard shows an honest "unregistered" badge — never a fake placeholder).
+    agent_id = _resolve_agent_id()
+
     run_live(**build_run_kwargs(
-        args, executor=executor, gateway=gateway, context=context, feed=feed))
+        args, executor=executor, gateway=gateway, context=context, feed=feed,
+        agent_id=agent_id))
 
 
 def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,

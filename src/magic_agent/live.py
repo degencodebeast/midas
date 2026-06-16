@@ -42,6 +42,7 @@ def run_live(
     snapshot_path: str | None = None,
     mode: str = "paper",
     venue: str = "binance",
+    agent_id: str | None = None,
     max_iters: int | None = None,
 ) -> int:
     """Poll ``feed(symbol)`` for the latest closed candle and drive ``on_candle``.
@@ -66,6 +67,13 @@ def run_live(
     ``/api/status``. ``mode``/``venue`` label the snapshot; ``starting_equity`` reuses
     the F2 ``session_start_available`` baseline. ``snapshot_path=None`` (default) keeps
     the loop backward-compatible — no file is written.
+
+    Trust-surface contract (P1.7-1): the snapshot's ``halted``/``daily_loss``/
+    ``max_daily_loss`` reflect the REAL live daily-loss kill-switch state (no longer a
+    hardcoded ``halted=False``) — ``halted`` tracks the same condition ``run_policies``
+    uses to deny entries. ``agent_id`` (the ERC-8004 identity, ``None`` when unregistered)
+    is forwarded into the snapshot so the dashboard badge shows the real id or an honest
+    "unregistered".
     """
     last_ts: object | None = None
     processed = 0
@@ -114,6 +122,14 @@ def run_live(
         # F4: publish the live status snapshot so a separate `serve` process can read
         # it. starting_equity reuses the F2 session-start realized cash baseline.
         if snapshot_path is not None:
+            # Compute the REAL safety state for the snapshot (no hardcoded halted=False):
+            # the daily-loss kill-switch trips exactly as run_policies evaluates it.
+            max_daily_loss = policy_config.max_daily_loss
+            daily_loss = max(0.0, -live_realized_pnl_today)
+            halted = (
+                max_daily_loss is not None
+                and live_realized_pnl_today <= -abs(max_daily_loss)
+            )
             write_status_snapshot(
                 snapshot_path,
                 build_status(
@@ -123,7 +139,10 @@ def run_live(
                     venue=venue,
                     mark_price=candle.close,
                     starting_equity=session_start_available,
-                    halted=False,
+                    halted=halted,
+                    daily_loss=daily_loss,
+                    max_daily_loss=max_daily_loss,
+                    agent_id=agent_id,
                 ),
             )
 
