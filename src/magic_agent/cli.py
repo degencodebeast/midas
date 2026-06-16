@@ -322,6 +322,12 @@ def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,
                 "currency": "USDT",
                 "realized_pnl": 0.0,
                 "open_pnl": 0.0,
+                # Full UI contract (page.tsx reads these) — kept in lock-step with
+                # build_status so the demo fallback never drifts from the live
+                # snapshot shape. None = "not reported" (honest placeholders).
+                "daily_loss": None,
+                "max_daily_loss": None,
+                "agent_id": None,
                 "positions": [],
             }
 
