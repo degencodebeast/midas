@@ -45,10 +45,21 @@ def run_live(
     ``max_iters`` bounds the loop (each iteration = one feed poll) so tests terminate;
     when ``None`` the loop runs until the feed raises ``StopIteration`` (live feeds
     block instead, so the bound is only needed for the fake-feed unit tests).
+
+    Daily-loss kill-switch (F2): ``realized_pnl_today`` forwarded to ``on_candle`` is
+    computed LIVE from the executor's realized cash. On the first processed candle we
+    snapshot ``session_start_available = executor.get_account(...).available``; thereafter
+    each candle forwards ``executor.get_account(close).available - session_start_available``
+    (in ``PaperExecutor`` ``available`` == realized cash, so this delta is the session's
+    realized PnL). The ``realized_pnl_today`` parameter is now a BASELINE seam added on top
+    of the live delta (default ``0.0`` = pure live behavior); tests can inject a non-zero
+    baseline to simulate a pre-existing daily loss without scripting the executor.
     """
     last_ts: object | None = None
     processed = 0
     iters = 0
+    baseline_pnl = realized_pnl_today
+    session_start_available: float | None = None
     while max_iters is None or iters < max_iters:
         iters += 1
         try:
@@ -63,6 +74,14 @@ def run_live(
             continue
         last_ts = ts
 
+        # Realized-PnL delta since session start (the live kill-switch input). Snapshot the
+        # starting realized cash on the first processed candle, then forward the delta
+        # (+ any injected baseline) each iteration.
+        available = executor.get_account(mark_price=candle.close).available
+        if session_start_available is None:
+            session_start_available = available
+        live_realized_pnl_today = baseline_pnl + (available - session_start_available)
+
         setup_fn = lambda: gateway.scan(symbol)  # noqa: E731 — scanner is the sole signal
         now = now_fn() if now_fn is not None else str(ts)
         on_candle(
@@ -76,7 +95,7 @@ def run_live(
             advisor=advisor,
             log=log,
             now=now,
-            realized_pnl_today=realized_pnl_today,
+            realized_pnl_today=live_realized_pnl_today,
         )
         processed += 1
 
