@@ -140,6 +140,8 @@ def test_build_run_kwargs_wires_log_and_policy_config(tmp_path):
     """build_run_kwargs returns the run_live kwargs with `log` = AgentLog at
     args.log and a NON-EMPTY (fail-closed) PolicyConfig — proving the live path
     actually wires a decision log (was the hole `/api/decisions` couldn't see)."""
+    from pathlib import Path
+
     from magic_agent.cli import build_parser, build_run_kwargs
     from magic_agent.context import CmcContextAdapter
     from magic_agent.executor import PaperExecutor
@@ -160,7 +162,7 @@ def test_build_run_kwargs_wires_log_and_policy_config(tmp_path):
 
     # log is a real AgentLog pointing at args.log
     assert isinstance(kwargs["log"], AgentLog)
-    assert kwargs["log"]._path == __import__("pathlib").Path(log_path)
+    assert kwargs["log"]._path == Path(log_path)
     # policy_config is a NON-EMPTY PolicyConfig (fail-closed: run_policies won't raise)
     assert isinstance(kwargs["policy_config"], PolicyConfig)
     assert kwargs["policy_config"].active()  # non-empty
