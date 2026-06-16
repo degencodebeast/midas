@@ -8,8 +8,14 @@ is the default executor so a bare ``magic-agent run`` never touches funds.
 from __future__ import annotations
 
 import argparse
+import os
+from typing import Callable
 
 from magic_agent.status_store import DEFAULT_STATUS_PATH
+
+# Default model when MAGIC_AGENT_LLM_MODEL is unset. A current Claude 4-class id
+# (verified against the live anthropic-sdk-python ModelParam list via context7).
+DEFAULT_LLM_MODEL = "claude-sonnet-4-6"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -61,31 +67,62 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _default_advisor_factory():  # pragma: no cover - real LLM SDK / API-key wiring
-    """Construct the REAL bounded LLM advisor (thin SDK/env wiring).
+def _make_anthropic_client(*, api_key: str, model: str) -> Callable[[str, str], str]:
+    """Build the real Anthropic (Claude) Messages-API client callable.
 
-    Kept behind ``# pragma: no cover``: it depends on an LLM SDK + an API key from the
-    environment, neither of which is exercised in unit tests. The advisor's behavior
-    (parse / clamp / fail-safe) is fully tested in ``tests/test_advisor.py`` with an
-    injected fake client; this factory only assembles the real client callable.
+    Returns ``client(system_prompt, user_prompt) -> str`` which issues a single
+    structured-output request (``system`` = doctrine, one ``user`` message) and returns
+    the model's TEXT (the JSON string the advisor parses). The SDK client is created
+    here; the ACTUAL network call is ``# pragma: no cover`` (no API key in unit tests).
+    The advisor wraps this in its own try/except, so any error here surfaces as
+    ``None`` advice (deterministic fallback) — never an exception out of the runner.
     """
-    import os
+    from anthropic import Anthropic
 
+    sdk = Anthropic(api_key=api_key)
+
+    def _client(system_prompt: str, user_prompt: str) -> str:  # pragma: no cover - network
+        message = sdk.messages.create(
+            model=model,
+            max_tokens=512,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+        # message.content is a list of content blocks; concatenate the text blocks.
+        return "".join(
+            getattr(block, "text", "")
+            for block in message.content
+            if getattr(block, "type", None) == "text"
+        )
+
+    return _client
+
+
+def _default_advisor_factory(
+    *, client_maker: Callable[..., Callable[[str, str], str]] = _make_anthropic_client,
+):
+    """Construct the REAL bounded LLM advisor from environment config.
+
+    Config (env):
+      * ``MAGIC_AGENT_LLM_API_KEY`` — Anthropic API key. If UNSET/empty, returns
+        ``None`` (no advisor → pure deterministic path). This is the SAFE default.
+      * ``MAGIC_AGENT_LLM_MODEL`` — model id (defaults to ``DEFAULT_LLM_MODEL``).
+
+    When a key is present, returns ``LlmAdvisor(client_maker(api_key=..., model=...))``
+    using the operating-doctrine system prompt. ``client_maker`` is injectable so tests
+    can supply a fake client builder and assert the wiring WITHOUT any network/SDK call.
+    The advisor's own parse/clamp/None-on-failure contract is unchanged.
+    """
     from magic_agent.advisor import LlmAdvisor
 
-    # The client is a callable client(system_prompt, user_prompt) -> str. The real LLM
-    # call goes here once an SDK is chosen; until then this is a clearly-stubbed seam
-    # that still returns a deterministic-safe "take" so the advisory path is harmless.
     api_key = os.environ.get("MAGIC_AGENT_LLM_API_KEY", "")
+    if not api_key:
+        # No credentials → no advisor → deterministic path (safe default, not a stub).
+        return None
 
-    def _client(system_prompt: str, user_prompt: str) -> str:
-        # TODO(cli): call the LLM SDK here using `api_key`, `system_prompt`, `user_prompt`.
-        # Returning a pass-through "take" keeps the path safe (clamp_advice is a no-op
-        # at size_factor 1.0) until the SDK is wired.
-        _ = (api_key, system_prompt, user_prompt)
-        return '{"action": "take", "size_factor": 1.0, "reasoning": "advisor stub"}'
-
-    return LlmAdvisor(_client)
+    model = os.environ.get("MAGIC_AGENT_LLM_MODEL") or DEFAULT_LLM_MODEL
+    client = client_maker(api_key=api_key, model=model)
+    return LlmAdvisor(client)
 
 
 def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed,

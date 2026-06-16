@@ -354,3 +354,83 @@ def test_build_run_kwargs_advisor_on_uses_factory():
         advisor_factory=lambda: sentinel,
     )
     assert kwargs["advisor"] is sentinel  # on => the (injected) advisor is wired
+
+
+# ---------------------------------------------------------------------------
+# L5b: real Anthropic-backed advisor factory (env-config, None-fail-safe)
+# ---------------------------------------------------------------------------
+
+def test_default_advisor_factory_no_key_returns_none(monkeypatch):
+    """No API key in env => factory returns None => deterministic path (the SAFE
+    default; NOT a pass-through stub). No network, no SDK call."""
+    from magic_agent.cli import _default_advisor_factory
+
+    monkeypatch.delenv("MAGIC_AGENT_LLM_API_KEY", raising=False)
+
+    # client_maker must NOT be invoked when there is no key.
+    def _exploding_maker(*, api_key, model):  # pragma: no cover - must not run
+        raise AssertionError("client_maker called despite missing API key")
+
+    advisor = _default_advisor_factory(client_maker=_exploding_maker)
+    assert advisor is None
+
+
+def test_default_advisor_factory_with_key_wires_real_llm_advisor(monkeypatch):
+    """API key present => factory returns an LlmAdvisor wired to the client built by
+    the (injected) client_maker — tested with a FAKE maker, so NO network/SDK call.
+    The returned advisor parses the fake client's valid JSON into the right advice."""
+    from magic_agent.advisor import DEFAULT_DOCTRINE, LlmAdvisor
+    from magic_agent.cli import _default_advisor_factory
+    from magic_agent.decision import LlmAdvice
+    from magic_agent.models import ContextSnapshot, Setup, Side
+
+    monkeypatch.setenv("MAGIC_AGENT_LLM_API_KEY", "sk-test-key")
+    monkeypatch.setenv("MAGIC_AGENT_LLM_MODEL", "claude-test-model")
+
+    captured = {}
+
+    def _fake_maker(*, api_key, model):
+        captured["api_key"] = api_key
+        captured["model"] = model
+
+        def _fake_client(system_prompt: str, user_prompt: str) -> str:
+            captured["system_prompt"] = system_prompt
+            return '{"action": "wait", "size_factor": 0.5, "reasoning": "trim"}'
+
+        return _fake_client
+
+    advisor = _default_advisor_factory(client_maker=_fake_maker)
+    assert isinstance(advisor, LlmAdvisor)
+    # env was threaded into the maker
+    assert captured["api_key"] == "sk-test-key"
+    assert captured["model"] == "claude-test-model"
+
+    # The advisor actually drives the wired (fake) client and parses its output.
+    setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on", 600.0, 588.0, 636.0, "chained_scob")
+    context = ContextSnapshot(regime="risk_off", risk_flag="elevated", status="ok")
+    advice = advisor(setup, context)
+    assert isinstance(advice, LlmAdvice)
+    assert advice.action_hint == "wait"
+    assert advice.size_factor == 0.5
+    # Uses the operating doctrine system prompt (unchanged advisor behavior).
+    assert captured["system_prompt"] == DEFAULT_DOCTRINE
+
+
+def test_default_advisor_factory_failure_fallback_is_none_not_wait(monkeypatch):
+    """When the wired client raises (e.g. network down), the advisor returns None
+    (deterministic wins) — it does NOT fabricate a 'wait'. Safety invariant."""
+    from magic_agent.cli import _default_advisor_factory
+    from magic_agent.models import ContextSnapshot, Setup, Side
+
+    monkeypatch.setenv("MAGIC_AGENT_LLM_API_KEY", "sk-test-key")
+
+    def _boom_maker(*, api_key, model):
+        def _boom_client(system_prompt: str, user_prompt: str) -> str:
+            raise RuntimeError("network down")
+
+        return _boom_client
+
+    advisor = _default_advisor_factory(client_maker=_boom_maker)
+    setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on", 600.0, 588.0, 636.0, "chained_scob")
+    context = ContextSnapshot(regime="risk_off", risk_flag="elevated", status="ok")
+    assert advisor(setup, context) is None  # None, NOT a 'wait' advice
