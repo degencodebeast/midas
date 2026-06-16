@@ -37,6 +37,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     jt = sub.add_parser("judge-trace", help="Print a one-screen policy proof (zero funds)")
     jt.set_defaults(func=_cmd_judge_trace)
+
+    sv = sub.add_parser("serve", help="Serve the read-only mission-control dashboard API")
+    sv.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    sv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    sv.add_argument("--log", default=".magic_agent/decisions.jsonl",
+                    help="Path to the JSONL decision log (default: .magic_agent/decisions.jsonl)")
+    sv.set_defaults(func=_cmd_serve)
+
     return parser
 
 
@@ -114,6 +122,49 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
         risk_pct=args.risk_pct,
         leverage=args.leverage,
     )
+
+
+def build_serve_app(*, log_path: str, status_provider=None):
+    """Build and return the read-only FastAPI app for the dashboard.
+
+    Parameters
+    ----------
+    log_path:
+        Path to the JSONL decision log (passed to ``create_app``).
+    status_provider:
+        A zero-argument callable returning a ``build_status``-shaped dict.
+        When ``None``, a demo ``PaperExecutor``-backed provider is built
+        automatically (mode="paper", venue="demo", mark_price=0.0).
+
+    Returns
+    -------
+    FastAPI
+        The constructed app — usable directly with ``TestClient`` (no server
+        required) or passed to ``uvicorn.run``.
+    """
+    from magic_agent.api import create_app
+    from magic_agent.executor import PaperExecutor
+    from magic_agent.status import build_status
+
+    if status_provider is None:
+        _executor = PaperExecutor(starting_equity=1000.0)
+
+        def status_provider() -> dict:  # type: ignore[misc]
+            return build_status(
+                _executor,
+                mode="paper",
+                venue="demo",
+                mark_price=0.0,
+            )
+
+    return create_app(log_path=log_path, status_fn=status_provider)
+
+
+def _cmd_serve(args: argparse.Namespace) -> None:  # pragma: no cover
+    import uvicorn
+
+    app = build_serve_app(log_path=args.log)
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 def _cmd_judge_trace(args: argparse.Namespace) -> None:  # pragma: no cover
