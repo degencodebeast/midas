@@ -55,6 +55,11 @@ POSITION_ALLOWLIST: set[str] = {"size"}
 # A leading negative-lookbehind for an identifier char ensures we don't match
 # ``status`` embedded in a longer identifier (e.g. ``statusOk``, ``setStatus``,
 # ``StatusData``). The trailing ``\b`` after the dotted id avoids partial words.
+# LIMITATION: destructuring reads (``const { halted } = status``) are NOT matched
+# — page.tsx uses none today (every read is ``status?.x``), and a wholesale switch
+# would trip ``test_read_set_extraction_sanity`` (which pins known fields as
+# must-be-present) rather than silently shrink the read-set. If page.tsx adopts
+# destructuring, extend this extractor to cover it.
 _STATUS_DOT = re.compile(r"(?<![A-Za-z0-9_$.])status\s*\??\.\s*([A-Za-z_$][\w$]*)")
 _STATUS_IDX = re.compile(r"(?<![A-Za-z0-9_$.])status\s*\[\s*[\"']([^\"']+)[\"']\s*\]")
 
