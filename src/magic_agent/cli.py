@@ -33,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Reject intents without a stop (default: on)")
     run.add_argument("--cooldown-seconds", dest="cooldown_seconds", type=float, default=None,
                      help="Minimum seconds between trades (default: off)")
+    # Decision log: the live audit trail AND the dashboard's /api/decisions feed
+    # source. Default MUST match `serve --log` so both processes share one file.
+    run.add_argument("--log", default=".magic_agent/decisions.jsonl",
+                     help="Path to the JSONL decision log (default: .magic_agent/decisions.jsonl)")
     run.set_defaults(func=_cmd_run)
 
     jt = sub.add_parser("judge-trace", help="Print a one-screen policy proof (zero funds)")
@@ -46,6 +50,44 @@ def build_parser() -> argparse.ArgumentParser:
     sv.set_defaults(func=_cmd_serve)
 
     return parser
+
+
+def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed) -> dict:
+    """Assemble the kwargs for ``run_live(...)`` from parsed CLI ``args`` + the
+    injected execution units (``executor``/``gateway``/``context``/``feed``).
+
+    This is the TESTABLE wiring extracted out of the ``# pragma: no cover``
+    live driver: it builds the fail-closed ``PolicyConfig`` from the flags AND
+    ``log=AgentLog(args.log)`` — the previously-missing decision log that feeds the
+    dashboard's ``/api/decisions`` endpoint. No network here; only the real ccxt
+    feed/executor *construction* (in ``_cmd_run``) stays uncovered.
+    """
+    from magic_agent.log import AgentLog
+    from magic_agent.policy import PolicyConfig
+
+    # Fail-closed: a NON-EMPTY PolicyConfig from the CLI flags. run_policies RAISES on
+    # an empty config, so every live entry is gated (this closes the "policy_config
+    # never passed live" gap).
+    policy_config = PolicyConfig(
+        max_daily_loss=args.max_daily_loss,
+        max_leverage=args.max_leverage,
+        max_concurrent=1,
+        require_stop=args.require_stop,
+        cooldown_seconds=args.cooldown_seconds,
+    )
+
+    return {
+        "executor": executor,
+        "gateway": gateway,
+        "context": context,
+        "feed": feed,
+        "symbol": args.symbol,
+        "policy_config": policy_config,
+        "risk_pct": args.risk_pct,
+        "leverage": args.leverage,
+        # The decision log: live audit trail + the dashboard's /api/decisions source.
+        "log": AgentLog(args.log),
+    }
 
 
 def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
@@ -75,18 +117,6 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
             exchange.urls["api"] = "https://fapi.asterdex-testnet.com/fapi"
         executor = AsterRestExecutor(exchange, args.symbol)
 
-    # Fail-closed: a NON-EMPTY PolicyConfig from the CLI flags. run_policies RAISES on
-    # an empty config, so every live entry is gated (this closes the "policy_config
-    # never passed live" gap).
-    from magic_agent.policy import PolicyConfig
-    policy_config = PolicyConfig(
-        max_daily_loss=args.max_daily_loss,
-        max_leverage=args.max_leverage,
-        max_concurrent=1,
-        require_stop=args.require_stop,
-        cooldown_seconds=args.cooldown_seconds,
-    )
-
     # Real closed-bar feed: fetch OHLCV, DROP the forming bar, return the latest CLOSED
     # candle + its open-time as the dedupe key. Thin ccxt wiring — the loop logic itself
     # lives in (unit-tested) run_live; this fetch is intentionally uncovered.
@@ -112,16 +142,8 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
 
     from magic_agent.live import run_live
 
-    run_live(
-        executor,
-        gateway=gateway,
-        context=context,
-        feed=feed,
-        symbol=args.symbol,
-        policy_config=policy_config,
-        risk_pct=args.risk_pct,
-        leverage=args.leverage,
-    )
+    run_live(**build_run_kwargs(
+        args, executor=executor, gateway=gateway, context=context, feed=feed))
 
 
 def build_serve_app(*, log_path: str, status_provider=None):

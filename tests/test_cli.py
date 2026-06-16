@@ -113,3 +113,102 @@ def test_build_serve_app_decisions_endpoint(tmp_path):
     records = resp.json()
     assert len(records) == 1
     assert records[0]["action"] == "HOLD"
+
+
+# ---------------------------------------------------------------------------
+# F1: `magic-agent run` writes the decision log (live audit + dashboard feed)
+# ---------------------------------------------------------------------------
+
+def test_run_log_default_matches_serve_default():
+    """`run --log` default MUST match `serve --log` default so both processes
+    read/write the same `.magic_agent/decisions.jsonl`."""
+    p = build_parser()
+    run_args = p.parse_args(["run"])
+    serve_args = p.parse_args(["serve"])
+    assert run_args.log == serve_args.log
+    assert run_args.log == ".magic_agent/decisions.jsonl"
+
+
+def test_run_log_overridable(tmp_path):
+    p = build_parser()
+    log_path = str(tmp_path / "custom.jsonl")
+    args = p.parse_args(["run", "--log", log_path])
+    assert args.log == log_path
+
+
+def test_build_run_kwargs_wires_log_and_policy_config(tmp_path):
+    """build_run_kwargs returns the run_live kwargs with `log` = AgentLog at
+    args.log and a NON-EMPTY (fail-closed) PolicyConfig — proving the live path
+    actually wires a decision log (was the hole `/api/decisions` couldn't see)."""
+    from magic_agent.cli import build_parser, build_run_kwargs
+    from magic_agent.context import CmcContextAdapter
+    from magic_agent.executor import PaperExecutor
+    from magic_agent.log import AgentLog
+    from magic_agent.policy import PolicyConfig
+
+    log_path = str(tmp_path / "decisions.jsonl")
+    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--log", log_path])
+
+    executor = PaperExecutor(starting_equity=1000.0)
+    kwargs = build_run_kwargs(
+        args,
+        executor=executor,
+        gateway=object(),
+        context=CmcContextAdapter(None),
+        feed=lambda symbol: (None, None),
+    )
+
+    # log is a real AgentLog pointing at args.log
+    assert isinstance(kwargs["log"], AgentLog)
+    assert kwargs["log"]._path == __import__("pathlib").Path(log_path)
+    # policy_config is a NON-EMPTY PolicyConfig (fail-closed: run_policies won't raise)
+    assert isinstance(kwargs["policy_config"], PolicyConfig)
+    assert kwargs["policy_config"].active()  # non-empty
+    # symbol/executor/feed are forwarded so run_live(**kwargs) is callable
+    assert kwargs["symbol"] == "BNB/USDT"
+    assert kwargs["executor"] is executor
+
+
+def test_build_run_kwargs_run_live_writes_a_decision_record(tmp_path):
+    """End-to-end-ish: feed build_run_kwargs's output (with a real AgentLog) into
+    run_live with a fake feed yielding ONE allowed setup → a JSON line lands in the
+    log file (proves the live path writes records `/api/decisions` can read)."""
+    import json
+
+    from magic_agent.cli import build_parser, build_run_kwargs
+    from magic_agent.context import CmcContextAdapter
+    from magic_agent.executor import PaperExecutor
+    from magic_agent.live import run_live
+    from magic_agent.models import Candle, Setup, Side
+
+    log_path = tmp_path / "decisions.jsonl"
+    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--log", str(log_path)])
+
+    allowed_setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on",
+                          600.0, 588.0, 636.0, "chained_scob")
+
+    class _FakeGateway:
+        def scan(self, symbol):
+            return allowed_setup
+
+    pairs = iter([(Candle(600, 601, 599, 600), 1000)])
+
+    def feed(symbol):
+        return next(pairs)
+
+    kwargs = build_run_kwargs(
+        args,
+        executor=PaperExecutor(starting_equity=1000.0),
+        gateway=_FakeGateway(),
+        context=CmcContextAdapter(None),
+        feed=feed,
+    )
+
+    run_live(**kwargs, max_iters=1)
+
+    # The log file now exists and holds at least one valid JSON decision line.
+    assert log_path.exists()
+    lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
+    assert len(lines) >= 1
+    rec = json.loads(lines[0])
+    assert "action" in rec and "outcome" in rec
