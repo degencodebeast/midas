@@ -1,0 +1,47 @@
+# magic-agent-run.service — poll loop (paper executor by default; no real funds)
+#
+# CRITICAL — shared working directory:
+#   magic-agent run WRITES .magic_agent/status.json and .magic_agent/decisions.jsonl.
+#   magic-agent serve READS the same files to power /api/status and /api/decisions.
+#   Both services MUST share the same WorkingDirectory (/opt/midas).
+#   Changing WorkingDirectory independently WILL break the serve API silently.
+#
+# Startup order: start magic-agent-run and magic-agent-serve (any order, they share
+# the working directory), then magic-agent-web, then your reverse proxy.
+#
+# To enable live trading, edit ExecStart and add --executor aster.
+# ASTER_PRIVATE_KEY must be set in EnvironmentFile for aster mode.
+
+[Unit]
+Description=magic-agent poll loop (paper executor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Replace 'midas' with the OS user that owns /opt/midas (never run as root).
+User=midas
+
+# MUST match WorkingDirectory of magic-agent-serve.service so both processes
+# share the same .magic_agent/ state directory.
+WorkingDirectory=/opt/midas
+
+# Load environment variables. Copy deploy/.env.example to /opt/midas/.env.
+EnvironmentFile=/opt/midas/.env
+
+# Default: paper executor (no real funds). To trade live, replace with:
+#   /usr/local/bin/uv run magic-agent run --executor aster --symbol BNB/USDT
+# Adjust the path to uv if it is installed elsewhere (e.g. ~/.local/bin/uv).
+# Run `which uv` as the service user to confirm the path.
+ExecStart=/usr/local/bin/uv run magic-agent run --executor paper --symbol BNB/USDT
+
+Restart=on-failure
+RestartSec=5
+
+# Keep the .magic_agent/ directory across restarts (it is gitignored; must
+# persist on disk — do not treat it as ephemeral tmpfiles).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=magic-agent-run
+
+[Install]
+WantedBy=multi-user.target
