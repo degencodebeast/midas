@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import argparse
 
+from magic_agent.status_store import DEFAULT_STATUS_PATH
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="magic-agent",
@@ -90,7 +92,7 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
         # F4: write a live status snapshot each candle so `serve` (a separate
         # process) reflects this loop's latest state via /api/status. Default path
         # matches build_serve_app's default reader so both processes share one file.
-        "snapshot_path": ".magic_agent/status.json",
+        "snapshot_path": DEFAULT_STATUS_PATH,
         "mode": "paper" if args.executor == "paper" else "live",
         "venue": "binance",  # OHLCV feed source
     }
@@ -152,7 +154,7 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
         args, executor=executor, gateway=gateway, context=context, feed=feed))
 
 
-def build_serve_app(*, log_path: str, snapshot_path: str = ".magic_agent/status.json",
+def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,
                     status_provider=None):
     """Build and return the read-only FastAPI app for the dashboard.
 
@@ -162,7 +164,7 @@ def build_serve_app(*, log_path: str, snapshot_path: str = ".magic_agent/status.
         Path to the JSONL decision log (passed to ``create_app``).
     snapshot_path:
         Path to the live status snapshot written by ``magic-agent run``
-        (default ``.magic_agent/status.json`` — same file ``run`` writes).
+        (default ``status_store.DEFAULT_STATUS_PATH`` — same file ``run`` writes).
         The default provider READS this file so ``serve`` reflects the live
         loop's latest state (cross-process F4 fix). When the file is absent it
         returns a clearly-labelled demo fallback (mode ``"demo"``).

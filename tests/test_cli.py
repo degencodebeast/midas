@@ -228,6 +228,28 @@ def test_build_serve_app_absent_snapshot_falls_back_to_demo(tmp_path):
     assert "positions" in data
 
 
+def test_run_writer_and_serve_reader_share_one_snapshot_path():
+    """The `run` writer (build_run_kwargs) and the `serve` reader (build_serve_app)
+    MUST resolve to the SAME snapshot path, or `serve` silently reverts to the demo
+    fallback in production. Both derive from status_store.DEFAULT_STATUS_PATH."""
+    import inspect
+
+    from magic_agent.cli import build_parser, build_run_kwargs, build_serve_app
+    from magic_agent.context import CmcContextAdapter
+    from magic_agent.executor import PaperExecutor
+
+    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT"])
+    writer_path = build_run_kwargs(
+        args,
+        executor=PaperExecutor(starting_equity=1000.0),
+        gateway=object(),
+        context=CmcContextAdapter(None),
+        feed=lambda symbol: (None, None),
+    )["snapshot_path"]
+    reader_default = inspect.signature(build_serve_app).parameters["snapshot_path"].default
+    assert writer_path == reader_default
+
+
 def test_build_run_kwargs_run_live_writes_a_decision_record(tmp_path):
     """End-to-end-ish: feed build_run_kwargs's output (with a real AgentLog) into
     run_live with a fake feed yielding ONE allowed setup → a JSON line lands in the

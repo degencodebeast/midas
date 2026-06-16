@@ -15,6 +15,11 @@ import json
 import os
 from pathlib import Path
 
+# Single source of truth for the cross-process snapshot path. The `run` writer
+# (cli.build_run_kwargs) and the `serve` reader (cli.build_serve_app) MUST share
+# this exact path or `serve` silently reverts to the demo fallback.
+DEFAULT_STATUS_PATH = ".magic_agent/status.json"
+
 
 def write_status_snapshot(path: str | os.PathLike[str], status: dict) -> None:
     """Atomically write ``status`` (a JSON-able dict) to ``path``.
