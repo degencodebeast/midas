@@ -35,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Reject intents without a stop (default: on)")
     run.add_argument("--cooldown-seconds", dest="cooldown_seconds", type=float, default=None,
                      help="Minimum seconds between trades (default: off)")
+    # L5: optional bounded LLM advisor. OFF by default => pure deterministic path.
+    # When on, an LlmAdvisor is wired in; the runner applies it ONLY via clamp_advice
+    # (size-down / wait-only), so it can never invent, re-grade, flip, or up-size.
+    run.add_argument("--advisor", dest="advisor", default=False,
+                     action="store_true",
+                     help="Enable the bounded LLM advisor (advisory size-down/wait; "
+                          "default: off = deterministic)")
     # Decision log: the live audit trail AND the dashboard's /api/decisions feed
     # source. Default MUST match `serve --log` so both processes share one file.
     run.add_argument("--log", default=".magic_agent/decisions.jsonl",
@@ -54,7 +61,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed) -> dict:
+def _default_advisor_factory():  # pragma: no cover - real LLM SDK / API-key wiring
+    """Construct the REAL bounded LLM advisor (thin SDK/env wiring).
+
+    Kept behind ``# pragma: no cover``: it depends on an LLM SDK + an API key from the
+    environment, neither of which is exercised in unit tests. The advisor's behavior
+    (parse / clamp / fail-safe) is fully tested in ``tests/test_advisor.py`` with an
+    injected fake client; this factory only assembles the real client callable.
+    """
+    import os
+
+    from magic_agent.advisor import LlmAdvisor
+
+    # The client is a callable client(system_prompt, user_prompt) -> str. The real LLM
+    # call goes here once an SDK is chosen; until then this is a clearly-stubbed seam
+    # that still returns a deterministic-safe "take" so the advisory path is harmless.
+    api_key = os.environ.get("MAGIC_AGENT_LLM_API_KEY", "")
+
+    def _client(system_prompt: str, user_prompt: str) -> str:
+        # TODO(cli): call the LLM SDK here using `api_key`, `system_prompt`, `user_prompt`.
+        # Returning a pass-through "take" keeps the path safe (clamp_advice is a no-op
+        # at size_factor 1.0) until the SDK is wired.
+        _ = (api_key, system_prompt, user_prompt)
+        return '{"action": "take", "size_factor": 1.0, "reasoning": "advisor stub"}'
+
+    return LlmAdvisor(_client)
+
+
+def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, feed,
+                     advisor_factory=_default_advisor_factory) -> dict:
     """Assemble the kwargs for ``run_live(...)`` from parsed CLI ``args`` + the
     injected execution units (``executor``/``gateway``/``context``/``feed``).
 
@@ -66,6 +101,11 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
     """
     from magic_agent.log import AgentLog
     from magic_agent.policy import PolicyConfig
+
+    # L5: honor --advisor. OFF (default) => advisor=None => pure deterministic path.
+    # ON => construct the advisor via the (injectable) factory. The runner only ever
+    # applies it through clamp_advice, so it is advisory (size-down/wait) by construction.
+    advisor = advisor_factory() if getattr(args, "advisor", False) else None
 
     # Fail-closed: a NON-EMPTY PolicyConfig from the CLI flags. run_policies RAISES on
     # an empty config, so every live entry is gated (this closes the "policy_config
@@ -87,6 +127,8 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
         "policy_config": policy_config,
         "risk_pct": args.risk_pct,
         "leverage": args.leverage,
+        # L5: advisory-only LLM advisor (None when --advisor is off = deterministic).
+        "advisor": advisor,
         # The decision log: live audit trail + the dashboard's /api/decisions source.
         "log": AgentLog(args.log),
         # F4: write a live status snapshot each candle so `serve` (a separate

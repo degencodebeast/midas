@@ -293,3 +293,64 @@ def test_build_run_kwargs_run_live_writes_a_decision_record(tmp_path):
     assert len(lines) >= 1
     rec = json.loads(lines[0])
     assert "action" in rec and "outcome" in rec
+
+
+# ---------------------------------------------------------------------------
+# L5: optional bounded LLM advisor flag (default off = deterministic)
+# ---------------------------------------------------------------------------
+
+def test_run_advisor_defaults_off():
+    """`run` without --advisor => advisor disabled (pure deterministic path)."""
+    p = build_parser()
+    args = p.parse_args(["run", "--symbol", "BNB/USDT"])
+    assert args.advisor is False
+
+
+def test_run_advisor_flag_parses():
+    """`run --advisor` => advisor enabled."""
+    p = build_parser()
+    args = p.parse_args(["run", "--symbol", "BNB/USDT", "--advisor"])
+    assert args.advisor is True
+
+
+def test_build_run_kwargs_advisor_off_is_none():
+    """When --advisor is off, build_run_kwargs sets advisor=None (deterministic)."""
+    from magic_agent.cli import build_parser, build_run_kwargs
+    from magic_agent.context import CmcContextAdapter
+    from magic_agent.executor import PaperExecutor
+
+    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT"])
+    sentinel = object()
+
+    def _factory():
+        return sentinel  # would be used only if the flag were on
+
+    kwargs = build_run_kwargs(
+        args,
+        executor=PaperExecutor(starting_equity=1000.0),
+        gateway=object(),
+        context=CmcContextAdapter(None),
+        feed=lambda symbol: (None, None),
+        advisor_factory=_factory,
+    )
+    assert kwargs["advisor"] is None  # off => deterministic, factory NOT called
+
+
+def test_build_run_kwargs_advisor_on_uses_factory():
+    """When --advisor is on, build_run_kwargs wires the advisor from the factory."""
+    from magic_agent.cli import build_parser, build_run_kwargs
+    from magic_agent.context import CmcContextAdapter
+    from magic_agent.executor import PaperExecutor
+
+    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--advisor"])
+    sentinel = object()
+
+    kwargs = build_run_kwargs(
+        args,
+        executor=PaperExecutor(starting_equity=1000.0),
+        gateway=object(),
+        context=CmcContextAdapter(None),
+        feed=lambda symbol: (None, None),
+        advisor_factory=lambda: sentinel,
+    )
+    assert kwargs["advisor"] is sentinel  # on => the (injected) advisor is wired
