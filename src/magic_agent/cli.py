@@ -149,13 +149,15 @@ def build_serve_app(*, log_path: str, status_provider=None):
     if status_provider is None:
         _executor = PaperExecutor(starting_equity=1000.0)
 
-        def status_provider() -> dict:  # type: ignore[misc]
+        def _provider() -> dict:
             return build_status(
                 _executor,
                 mode="paper",
                 venue="demo",
                 mark_price=0.0,
             )
+
+        status_provider = _provider
 
     return create_app(log_path=log_path, status_fn=status_provider)
 
