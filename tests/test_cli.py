@@ -171,6 +171,63 @@ def test_build_run_kwargs_wires_log_and_policy_config(tmp_path):
     assert kwargs["executor"] is executor
 
 
+# ---------------------------------------------------------------------------
+# F4: serve reads the live status snapshot (run writes, serve reads)
+# ---------------------------------------------------------------------------
+
+def test_build_serve_app_reads_seeded_snapshot_not_demo(tmp_path):
+    """When a status snapshot file is present, build_serve_app's default provider
+    returns THAT snapshot (the live `run` process's state) — NOT the detached demo
+    PaperExecutor. This is the cross-process fix."""
+    import json
+    from fastapi.testclient import TestClient
+    from magic_agent.cli import build_serve_app
+
+    log_file = tmp_path / "decisions.jsonl"
+    log_file.write_text("")
+    snapshot_path = tmp_path / "status.json"
+    seeded = {
+        "mode": "live",
+        "venue": "binance",
+        "halted": False,
+        "equity": 1234.5,
+        "available": 1200.0,
+        "currency": "USDT",
+        "realized_pnl": 200.0,
+        "open_pnl": 34.5,
+        "positions": [{"symbol": "BNB/USDT", "side": "long", "qty": 2.0, "size": 2.0,
+                       "entry_price": 600.0, "stop_loss": 588.0, "take_profit": 636.0,
+                       "pnl": 34.5}],
+    }
+    snapshot_path.write_text(json.dumps(seeded))
+
+    app = build_serve_app(log_path=str(log_file), snapshot_path=str(snapshot_path))
+    client = TestClient(app)
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    assert resp.json() == seeded  # the seeded snapshot, not the demo executor
+
+
+def test_build_serve_app_absent_snapshot_falls_back_to_demo(tmp_path):
+    """No snapshot file present → the default provider returns a clearly-labelled
+    demo fallback dict (mode 'demo') so serve still responds before `run` starts."""
+    from fastapi.testclient import TestClient
+    from magic_agent.cli import build_serve_app
+
+    log_file = tmp_path / "decisions.jsonl"
+    log_file.write_text("")
+    snapshot_path = tmp_path / "status.json"  # not created
+
+    app = build_serve_app(log_path=str(log_file), snapshot_path=str(snapshot_path))
+    client = TestClient(app)
+    resp = client.get("/api/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["mode"] == "demo"
+    assert "equity" in data
+    assert "positions" in data
+
+
 def test_build_run_kwargs_run_live_writes_a_decision_record(tmp_path):
     """End-to-end-ish: feed build_run_kwargs's output (with a real AgentLog) into
     run_live with a fake feed yielding ONE allowed setup → a JSON line lands in the

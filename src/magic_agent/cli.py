@@ -87,6 +87,12 @@ def build_run_kwargs(args: argparse.Namespace, *, executor, gateway, context, fe
         "leverage": args.leverage,
         # The decision log: live audit trail + the dashboard's /api/decisions source.
         "log": AgentLog(args.log),
+        # F4: write a live status snapshot each candle so `serve` (a separate
+        # process) reflects this loop's latest state via /api/status. Default path
+        # matches build_serve_app's default reader so both processes share one file.
+        "snapshot_path": ".magic_agent/status.json",
+        "mode": "paper" if args.executor == "paper" else "live",
+        "venue": "binance",  # OHLCV feed source
     }
 
 
@@ -146,17 +152,23 @@ def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop
         args, executor=executor, gateway=gateway, context=context, feed=feed))
 
 
-def build_serve_app(*, log_path: str, status_provider=None):
+def build_serve_app(*, log_path: str, snapshot_path: str = ".magic_agent/status.json",
+                    status_provider=None):
     """Build and return the read-only FastAPI app for the dashboard.
 
     Parameters
     ----------
     log_path:
         Path to the JSONL decision log (passed to ``create_app``).
+    snapshot_path:
+        Path to the live status snapshot written by ``magic-agent run``
+        (default ``.magic_agent/status.json`` — same file ``run`` writes).
+        The default provider READS this file so ``serve`` reflects the live
+        loop's latest state (cross-process F4 fix). When the file is absent it
+        returns a clearly-labelled demo fallback (mode ``"demo"``).
     status_provider:
         A zero-argument callable returning a ``build_status``-shaped dict.
-        When ``None``, a demo ``PaperExecutor``-backed provider is built
-        automatically (mode="paper", venue="demo", mark_price=0.0).
+        When ``None``, the snapshot-reading provider above is used.
 
     Returns
     -------
@@ -165,22 +177,27 @@ def build_serve_app(*, log_path: str, status_provider=None):
         required) or passed to ``uvicorn.run``.
     """
     from magic_agent.api import create_app
-    from magic_agent.executor import PaperExecutor
-    from magic_agent.status import build_status
+    from magic_agent.status_store import read_status_snapshot
 
     if status_provider is None:
-        _starting_equity = 1000.0
-        _executor = PaperExecutor(starting_equity=_starting_equity)
-
         def _provider() -> dict:
-            return build_status(
-                _executor,
-                symbol="BNB/USDT",
-                mode="paper",
-                venue="demo",
-                mark_price=0.0,
-                starting_equity=_starting_equity,
-            )
+            # Cross-process: reflect the live `run` loop's latest snapshot. The
+            # detached demo executor (the F4 bug) is only a fallback before `run`
+            # starts writing — and it is clearly labelled mode "demo".
+            snap = read_status_snapshot(snapshot_path)
+            if snap is not None:
+                return snap
+            return {
+                "mode": "demo",
+                "venue": "demo",
+                "halted": False,
+                "equity": 0.0,
+                "available": 0.0,
+                "currency": "USDT",
+                "realized_pnl": 0.0,
+                "open_pnl": 0.0,
+                "positions": [],
+            }
 
         status_provider = _provider
 

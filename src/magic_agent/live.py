@@ -21,6 +21,8 @@ from magic_agent.log import AgentLog
 from magic_agent.models import ContextSnapshot, Setup
 from magic_agent.policy import PolicyConfig
 from magic_agent.runner import on_candle
+from magic_agent.status import build_status
+from magic_agent.status_store import write_status_snapshot
 
 
 def run_live(
@@ -37,6 +39,9 @@ def run_live(
     log: AgentLog | None = None,
     now_fn: Callable[[], str] | None = None,
     realized_pnl_today: float = 0.0,
+    snapshot_path: str | None = None,
+    mode: str = "paper",
+    venue: str = "binance",
     max_iters: int | None = None,
 ) -> int:
     """Poll ``feed(symbol)`` for the latest closed candle and drive ``on_candle``.
@@ -54,6 +59,13 @@ def run_live(
     realized PnL). The ``realized_pnl_today`` parameter is now a BASELINE seam added on top
     of the live delta (default ``0.0`` = pure live behavior); tests can inject a non-zero
     baseline to simulate a pre-existing daily loss without scripting the executor.
+
+    Shared live status (F4): when ``snapshot_path`` is set, after each processed candle
+    a fresh ``build_status(...)`` snapshot is written (atomically) to that path so a
+    separate ``serve`` process can read the live loop's latest state via
+    ``/api/status``. ``mode``/``venue`` label the snapshot; ``starting_equity`` reuses
+    the F2 ``session_start_available`` baseline. ``snapshot_path=None`` (default) keeps
+    the loop backward-compatible — no file is written.
     """
     last_ts: object | None = None
     processed = 0
@@ -98,5 +110,21 @@ def run_live(
             realized_pnl_today=live_realized_pnl_today,
         )
         processed += 1
+
+        # F4: publish the live status snapshot so a separate `serve` process can read
+        # it. starting_equity reuses the F2 session-start realized cash baseline.
+        if snapshot_path is not None:
+            write_status_snapshot(
+                snapshot_path,
+                build_status(
+                    executor,
+                    symbol=symbol,
+                    mode=mode,
+                    venue=venue,
+                    mark_price=candle.close,
+                    starting_equity=session_start_available,
+                    halted=False,
+                ),
+            )
 
     return processed

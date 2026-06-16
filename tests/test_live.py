@@ -268,6 +268,52 @@ def test_run_live_no_loss_executor_yields_zero_realized_pnl_today():
     assert records[-1]["outcome"] == Outcome.OPENED.value
 
 
+def test_run_live_writes_status_snapshot_per_candle(tmp_path):
+    # F4: when a snapshot_path is injected, run_live writes a build_status-shaped
+    # snapshot file after processing a candle (cross-process: serve reads this file).
+    import json
+
+    ex = PaperExecutor(1000.0)
+    gw = _FakeGateway(_setup(rating="C"))  # vetoed -> stays flat, but candle is processed
+    snapshot_path = tmp_path / "status.json"
+    pairs = [(Candle(600, 601, 599, 600), 1000)]
+    count = run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed(pairs),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        snapshot_path=str(snapshot_path),
+        mode="paper",
+        venue="binance",
+        max_iters=1,
+    )
+    assert count == 1
+    assert snapshot_path.exists()
+    snap = json.loads(snapshot_path.read_text())
+    assert snap["mode"] == "paper"
+    assert "equity" in snap
+    assert "positions" in snap
+
+
+def test_run_live_no_snapshot_path_writes_nothing(tmp_path):
+    # Backward compatible: snapshot_path=None (default) → no file written.
+    ex = PaperExecutor(1000.0)
+    gw = _FakeGateway(_setup(rating="C"))
+    snapshot_path = tmp_path / "status.json"
+    run_live(
+        ex,
+        gateway=gw,
+        context=CmcContextAdapter(None),
+        feed=_fake_feed([(Candle(600, 601, 599, 600), 1000)]),
+        symbol="BNB/USDT",
+        policy_config=PolicyConfig(max_daily_loss=50.0, max_leverage=5.0, require_stop=True),
+        max_iters=1,
+    )
+    assert not snapshot_path.exists()
+
+
 def test_run_live_skips_none_ts_without_advancing_gate():
     # A feed returning (None, None) (e.g. a transient fetch error) is skipped and does
     # NOT advance last_ts, so a subsequent real candle still processes.
