@@ -17,12 +17,25 @@ dependencies = [
 [project.scripts]
 magic-agent = "magic_agent.cli:main"
 
+[project.optional-dependencies]
+# ERC-8004 on-chain identity is OPTIONAL. Without it, the agent runs normally
+# and the dashboard shows "unregistered" (see cli._resolve_agent_id).
+# Install with: `uv sync --extra identity` or `pip install 'magic-agent[identity]'`.
+# Distribution/import package is `bnbagent` (https://github.com/bnb-chain/bnbagent-sdk).
+identity = ["bnbagent @ git+https://github.com/bnb-chain/bnbagent-sdk"]
+
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.uv.sources]
-magic-scanner = { path = "../trading-scanner", editable = true }
+# Deployable (committed) source: git-pinned scanner so `midas` installs standalone
+# on a fresh VPS with no sibling checkout. The scanner repo is PUBLIC — no token needed.
+magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", branch = "build/scanner-core" }
+# Local-dev override (editable sibling scanner): do NOT commit this uncommented.
+# After `uv sync`, run `uv pip install -e ../trading-scanner` to point at the local
+# checkout, or temporarily swap the source above to:
+#   magic-scanner = { path = "../trading-scanner", editable = true }
 
 [dependency-groups]
 dev = [

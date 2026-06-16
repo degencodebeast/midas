@@ -198,9 +198,15 @@ def _resolve_agent_id() -> str | None:  # pragma: no cover - on-chain wiring
     try:
         from magic_agent.identity import Erc8004Identity
 
-        # The concrete registrar (bnbagent-sdk Erc8004Contract) is constructed here
-        # from env; absence/any error -> unregistered (None), never a fake id.
-        from bnbagent_sdk import Erc8004Contract  # type: ignore
+        # The concrete registrar comes from the OPTIONAL `bnbagent` SDK
+        # (install with `pip install 'magic-agent[identity]'`). It is imported
+        # lazily and best-effort: if the extra is not installed, or the concrete
+        # registrar is not yet wired, ANY error -> unregistered (None), never a
+        # fake id. NOTE: the `bnbagent` SDK exposes `ERC8004Agent`
+        # (`bnbagent.erc8004`), not an `Erc8004Contract`; the production wiring
+        # to that real API is intentionally still pending, so identity stays
+        # "unregistered" until it is completed — honest by construction.
+        from bnbagent_sdk import Erc8004Contract  # type: ignore  # noqa: F401  # pending real ERC8004Agent wiring
 
         registrar = Erc8004Contract(
             rpc_url=os.environ["MAGIC_AGENT_ERC8004_RPC"],
