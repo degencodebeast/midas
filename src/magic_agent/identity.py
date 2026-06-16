@@ -1,8 +1,8 @@
 # src/magic_agent/identity.py
-"""ERC-8004 on-chain agent identity via bnbagent-sdk.
+"""ERC-8004 on-chain agent identity via the optional ``bnbagent`` SDK.
 
-``registrar`` is injected (the bnbagent-sdk ``Erc8004Contract`` / agent client in the
-CLI, a stub in tests) and must expose ``register(agent_uri, metadata) -> agent_id``.
+``registrar`` is injected (an adapter over the SDK's ``ERC8004Agent`` in the CLI,
+a stub in tests) and must expose ``register(agent_uri, metadata) -> agent_id``.
 Registration is idempotent — once we hold an ``agent_id`` we never re-register.
 """
 from __future__ import annotations

@@ -196,30 +196,21 @@ def _resolve_agent_id() -> str | None:  # pragma: no cover - on-chain wiring
     if not agent_uri:
         return None  # not configured -> unregistered, honestly
     try:
-        from magic_agent.identity import Erc8004Identity
-
         # The concrete registrar comes from the OPTIONAL `bnbagent` SDK
-        # (install with `pip install 'magic-agent[identity]'`). It is imported
-        # lazily and best-effort: if the extra is not installed, or the concrete
-        # registrar is not yet wired, ANY error -> unregistered (None), never a
-        # fake id. NOTE: the `bnbagent` SDK exposes `ERC8004Agent`
-        # (`bnbagent.erc8004`), not an `Erc8004Contract`; the production wiring
-        # to that real API is intentionally still pending, so identity stays
-        # "unregistered" until it is completed — honest by construction.
-        from bnbagent_sdk import Erc8004Contract  # type: ignore  # noqa: F401  # pending real ERC8004Agent wiring
+        # (install with `pip install 'magic-agent[identity]'`). Importing the real
+        # type proves the extra is installed; the adapter that bridges our
+        # `Erc8004Identity.register()` onto the SDK's `ERC8004Agent.register_agent()`
+        # is intentionally NOT wired yet (a flagged follow-up). So even WITH the
+        # extra installed, this path raises below and identity stays "unregistered"
+        # by construction — honest, never a fabricated id.
+        from bnbagent import ERC8004Agent  # type: ignore  # noqa: F401  # real SDK type; adapter pending
 
-        registrar = Erc8004Contract(
-            rpc_url=os.environ["MAGIC_AGENT_ERC8004_RPC"],
-            private_key=os.environ["MAGIC_AGENT_ERC8004_KEY"],
+        raise NotImplementedError(
+            "ERC8004Agent.register_agent wiring is pending; identity stays unregistered"
         )
-        identity = Erc8004Identity(
-            registrar,
-            agent_uri=agent_uri,
-            metadata={"name": "MIDAS", "track": "BNB-1"},
-        )
-        return str(identity.register())
     except Exception:
-        # On-chain registration is best-effort: any failure -> unregistered, not a crash.
+        # Extra absent OR registration adapter not yet wired -> unregistered,
+        # never a crash, never a fake id.
         return None
 
 
