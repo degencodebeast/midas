@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from magic_agent.context import CmcContextAdapter
-from magic_agent.decision import build_decision, RISK_PCT_DEFAULT
+from magic_agent.decision import build_decision, clamp_advice, LlmAdvice, RISK_PCT_DEFAULT
 from magic_agent.executor import PerpExecutor
 from magic_agent.log import AgentLog, decision_record
 from magic_agent.models import (
@@ -42,7 +42,13 @@ def on_candle(
     now: str = "",
     policy_config: "PolicyConfig | None" = None,
     realized_pnl_today: float = 0.0,
+    advisor: "Callable[[Setup, ContextSnapshot], LlmAdvice | None] | None" = None,
 ) -> tuple[AgentDecision, Outcome]:
+    # advisor audit fields — None on the pure-deterministic path (no advisor / no advice).
+    baseline_qty: float | None = None
+    llm_size_factor: float | None = None
+    llm_action_hint: str | None = None
+
     # 1. Stops first — deterministic risk before anything else.
     pos = executor.get_position()
     if pos.side is not Side.FLAT and check_stops(pos, candle):
@@ -51,7 +57,9 @@ def on_candle(
                                  "stop", "stop or target hit")
         if log is not None:
             from magic_agent.models import ContextSnapshot
-            log(decision_record(decision, ContextSnapshot("neutral", "low", "ok"), outcome, now=now))
+            log(decision_record(decision, ContextSnapshot("neutral", "low", "ok"), outcome,
+                                now=now, baseline_qty=baseline_qty,
+                                llm_size_factor=llm_size_factor, llm_action_hint=llm_action_hint))
         return decision, outcome
 
     # 2. Already in a position -> hold (one position at a time).
@@ -69,6 +77,17 @@ def on_candle(
     account = executor.get_account(mark_price=candle.close)
     decision = build_decision(setup, ctx, account, risk_pct=risk_pct, leverage=leverage)
 
+    # Bounded AI seam: the advisor reaches the decision ONLY via clamp_advice, which
+    # guarantees size-down/wait-only — it can never un-veto, flip, or change geometry.
+    # baseline_qty/llm_* stay None on the pure-deterministic path (no advisor configured).
+    if advisor is not None:
+        baseline_qty = decision.intent.qty if decision.intent else None
+        advice = advisor(setup, ctx)
+        if advice is not None:
+            llm_size_factor = advice.size_factor
+            llm_action_hint = advice.action_hint
+            decision = clamp_advice(decision, advice)
+
     if not decision.gate.allow:
         outcome = Outcome.SKIPPED_VETO
     elif decision.intent is None or decision.intent.qty <= 0:
@@ -84,10 +103,13 @@ def on_candle(
             verdict = run_policies(decision.intent, pstate, policy_config)
             if not verdict.approved:
                 if log is not None:
-                    log(decision_record(decision, ctx, Outcome.SKIPPED_POLICY, now=now))
+                    log(decision_record(decision, ctx, Outcome.SKIPPED_POLICY, now=now,
+                                        baseline_qty=baseline_qty, llm_size_factor=llm_size_factor,
+                                        llm_action_hint=llm_action_hint))
                 return decision, Outcome.SKIPPED_POLICY
         outcome = executor.open_position(decision.intent)
 
     if log is not None:
-        log(decision_record(decision, ctx, outcome, now=now))
+        log(decision_record(decision, ctx, outcome, now=now, baseline_qty=baseline_qty,
+                            llm_size_factor=llm_size_factor, llm_action_hint=llm_action_hint))
     return decision, outcome

@@ -72,3 +72,68 @@ def test_policy_denial_prevents_open(monkeypatch):
     )
     assert outcome is Outcome.SKIPPED_POLICY
     assert ex.get_position().side is Side.FLAT  # NEVER reached the executor
+
+
+def test_on_candle_advisor_take_halves_qty_and_logs_baseline():
+    from magic_agent.decision import LlmAdvice
+
+    # baseline qty (deterministic, no advisor)
+    ex0 = PaperExecutor(1000.0)
+    base_decision, base_outcome = on_candle(
+        ex0, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+    )
+    assert base_outcome is Outcome.OPENED
+    baseline_qty = ex0.get_position().size
+
+    records: list[dict] = []
+    ex = PaperExecutor(1000.0)
+    decision, outcome = on_candle(
+        ex, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+        advisor=lambda setup, ctx: LlmAdvice("take", size_factor=0.5),
+        log=records.append,
+    )
+    assert outcome is Outcome.OPENED
+    # opened qty is HALF the deterministic baseline
+    assert ex.get_position().size == baseline_qty * 0.5
+    assert len(records) == 1
+    rec = records[0]
+    assert rec["baseline_qty"] == baseline_qty       # pre-clamp deterministic size
+    assert rec["llm_size_factor"] == 0.5
+    assert rec["llm_action_hint"] == "take"
+    assert rec["qty"] == baseline_qty * 0.5           # clamped final size
+
+
+def test_on_candle_advisor_wait_does_not_open():
+    from magic_agent.decision import LlmAdvice
+
+    records: list[dict] = []
+    ex = PaperExecutor(1000.0)
+    decision, outcome = on_candle(
+        ex, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+        advisor=lambda setup, ctx: LlmAdvice("wait", size_factor=1.0),
+        log=records.append,
+    )
+    assert ex.get_position().side is Side.FLAT  # no position opened
+    assert outcome is not Outcome.OPENED
+    assert decision.action is Action.HOLD
+    # the advisor's recommendation is still auditable in the log
+    assert len(records) == 1
+    assert records[0]["llm_action_hint"] == "wait"
+
+
+def test_on_candle_advisor_none_matches_deterministic_baseline():
+    records: list[dict] = []
+    ex = PaperExecutor(1000.0)
+    _, outcome = on_candle(
+        ex, setup_fn=lambda: _setup(), context=CmcContextAdapter(None),
+        candle=Candle(600, 601, 599, 600),
+        log=records.append,
+    )
+    assert outcome is Outcome.OPENED
+    # no advisor configured -> baseline/llm fields are None
+    assert records[0]["baseline_qty"] is None
+    assert records[0]["llm_size_factor"] is None
+    assert records[0]["llm_action_hint"] is None
