@@ -77,18 +77,10 @@ uv sync                          # magic-agent + commit-pinned scanner
 
 ---
 
-## Step 3 — Build the web dashboard
+## Step 3 — Configure environment
 
-```bash
-cd /opt/midas/web
-npm ci
-npm run build
-cd /opt/midas
-```
-
----
-
-## Step 4 — Configure environment
+Do this **before** building the web dashboard (Step 4) — `NEXT_PUBLIC_API_BASE` is baked
+into the build.
 
 ```bash
 cp /opt/midas/deploy/.env.example /opt/midas/.env
@@ -103,8 +95,36 @@ Key decisions to make in `.env`:
 | `ASTER_PRIVATE_KEY` | Leave blank unless using `--executor aster` in the run unit |
 | `MAGIC_AGENT_LLM_API_KEY` | Leave blank to keep deterministic mode (default, safe) |
 | `MAGIC_AGENT_CMC_API_KEY` | Optional; observe-only today — does not gate trades |
-| `NEXT_PUBLIC_API_BASE` | Set to `https://your-domain.example.com/api` |
+| `NEXT_PUBLIC_API_BASE` | Set to `https://your-domain.example.com/api` (baked into the web build — see Step 4) |
 | `MAGIC_AGENT_ERC8004_*` | Optional; identity stays `unregistered` pending wiring |
+
+> **`.env` format matters.** This file is consumed verbatim by systemd's
+> `EnvironmentFile=`, which does **not** strip inline comments — for `KEY=value # note`
+> the `# note` becomes part of the value. Keep every line a clean `KEY=value` (the
+> comments in `.env.example` live on their own `#` lines for exactly this reason). In
+> particular, leave `ASTER_TESTNET=` empty for mainnet; a value like `ASTER_TESTNET=  # …`
+> would parse as non-empty and **silently select testnet**.
+
+---
+
+## Step 4 — Build the web dashboard
+
+`NEXT_PUBLIC_API_BASE` is a **build-time** value: Next.js inlines it into the browser
+bundle during `npm run build`. It must be present in the environment **before** you
+build — the web unit's `EnvironmentFile` only sets the server process env and does **not**
+change an already-built client bundle. Source the `.env` from Step 3 into the build shell:
+
+```bash
+cd /opt/midas/web
+set -a; . /opt/midas/.env; set +a   # exports NEXT_PUBLIC_API_BASE (and the rest) for the build
+npm ci
+npm run build
+cd /opt/midas
+```
+
+> **Rebuild on change:** any time you change `NEXT_PUBLIC_API_BASE`, re-run `npm run
+> build` — editing `.env` or restarting the web service will not update an
+> already-built dashboard.
 
 ---
 

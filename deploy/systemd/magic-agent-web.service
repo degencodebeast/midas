@@ -3,8 +3,9 @@
 # This unit serves the pre-built Next.js dashboard on port 3000 (localhost only).
 # The reverse proxy (nginx) forwards all non-/api/* traffic here.
 #
-# Before enabling: build the web assets once (or on each deploy):
-#   cd /opt/midas/web && npm ci && npm run build
+# Before enabling: build the web assets with NEXT_PUBLIC_API_BASE set — it is baked into
+# the client bundle at BUILD time, NOT read at runtime (see deploy/README.md Step 4):
+#   cd /opt/midas/web && set -a && . /opt/midas/.env && set +a && npm ci && npm run build
 #
 # Startup order: magic-agent-run + magic-agent-serve first (any order, they
 # share the working directory), then this unit, then the reverse proxy.
@@ -22,7 +23,8 @@ User=midas
 # The web process talks to the serve API over HTTP (via NEXT_PUBLIC_API_BASE).
 WorkingDirectory=/opt/midas/web
 
-# Load environment variables (picks up NEXT_PUBLIC_API_BASE).
+# Server-process env only. NOTE: NEXT_PUBLIC_API_BASE is baked into the CLIENT bundle at
+# build time (see header) — this EnvironmentFile does NOT change an already-built dashboard.
 EnvironmentFile=/opt/midas/.env
 
 # Runs the pre-built Next.js production server on port 3000 (default).
