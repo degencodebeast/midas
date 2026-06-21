@@ -37,6 +37,9 @@ class ReconciledPosition:
             when the reconcile caller does not carry setup geometry.
         identity_key: Identity key of the open position's instrument, used to resolve
             its price frame in the paper-exit ``observe`` port. ``None`` when absent.
+        entry: Setup entry price. Carried so the dashboard status projection can
+            surface the position's real entry level (not a hardcoded zero). ``None``
+            when the reconcile caller does not carry setup geometry.
         stop: Structural stop price. A bar low at/below it triggers a protective stop
             exit (the highest-precedence exit). ``None`` when absent.
         campaign_dol: Campaign drawing-of-liquidity target. A bar high at/above it
@@ -48,6 +51,7 @@ class ReconciledPosition:
     stressed_loss_per_unit: Decimal = Decimal("0")
     symbol: str | None = None
     identity_key: str | None = None
+    entry: Decimal | None = None
     stop: Decimal | None = None
     campaign_dol: Decimal | None = None
 
@@ -129,14 +133,16 @@ class PositionManager:
             stressed_loss_per_unit = setup.entry - setup.structural_stop
             symbol = setup.symbol
             identity_key = setup.identity_key
+            entry = setup.entry
             stop = setup.structural_stop
             campaign_dol = setup.campaign_dol
         else:
             stressed_loss_per_unit = Decimal("0")
-            symbol = identity_key = stop = campaign_dol = None
+            symbol = identity_key = entry = stop = campaign_dol = None
         position = ReconciledPosition(
             intent.intent_id, position_qty, stressed_loss_per_unit,
-            symbol=symbol, identity_key=identity_key, stop=stop, campaign_dol=campaign_dol,
+            symbol=symbol, identity_key=identity_key,
+            entry=entry, stop=stop, campaign_dol=campaign_dol,
         )
         self.book.append(position)
         return position

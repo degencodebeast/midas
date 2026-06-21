@@ -66,6 +66,7 @@ class PositionStore:
                 # encoded as exact strings (or null) with no binary-float drift.
                 "symbol": position.symbol,
                 "identity_key": position.identity_key,
+                "entry": None if position.entry is None else str(position.entry),
                 "stop": None if position.stop is None else str(position.stop),
                 "campaign_dol": (
                     None if position.campaign_dol is None else str(position.campaign_dol)
@@ -108,8 +109,10 @@ class PositionStore:
         # Optional exit-context fields (records written before this field set will
         # simply lack them); decode the optional decimals exactly.
         try:
+            entry = record.get("entry")
             stop = record.get("stop")
             campaign_dol = record.get("campaign_dol")
+            entry_dec = None if entry is None else Decimal(entry)
             stop_dec = None if stop is None else Decimal(stop)
             campaign_dol_dec = None if campaign_dol is None else Decimal(campaign_dol)
         except (ArithmeticError, TypeError) as exc:
@@ -120,6 +123,7 @@ class PositionStore:
             stressed_loss_per_unit,
             symbol=record.get("symbol"),
             identity_key=record.get("identity_key"),
+            entry=entry_dec,
             stop=stop_dec,
             campaign_dol=campaign_dol_dec,
         )

@@ -134,9 +134,11 @@ class SpotStatusExecutor:
       tracked on the book yet (the close realizes into equity).
     * :meth:`get_position` surfaces the single open long (spot concurrency cap is
       one) as a :class:`~magic_agent.models.PositionState` with its booked
-      ``quantity`` as ``size`` and its structural ``stop`` as ``stop_loss``.
-      ``entry_price`` is the booked position's reconcile geometry when present,
-      else ``None`` (not fabricated). ``FLAT`` when the book is empty.
+      ``quantity`` as ``size``, its setup ``entry`` as ``entry_price``, its
+      structural ``stop`` as ``stop_loss``, and its ``campaign_dol`` as
+      ``take_profit``. Each is the booked position's reconcile geometry when present,
+      else an honest fallback (``0.0`` entry / ``None`` levels — never fabricated).
+      ``FLAT`` when the book is empty.
     """
 
     def __init__(self, *, equity_usd: Decimal, cash_usd: Decimal, book) -> None:
@@ -147,22 +149,27 @@ class SpotStatusExecutor:
     def get_position(self) -> PositionState:
         """Return the single open spot long, or ``FLAT`` when the book is empty.
 
-        ``entry_price`` is reported as ``0.0`` because the reconcile book does not
-        track a fill price (a truthful zero — NOT a fabricated entry); combined with
-        the ``mark_price=0.0`` ``build_status`` is called with, the surfaced position
-        ``pnl`` derives to ``0.0`` (no mark-to-market on the spot book yet) rather
-        than inventing an unrealized number.
+        Projects the booked position's real setup geometry: ``entry_price`` from its
+        ``entry``, ``stop_loss`` from its structural ``stop``, and ``take_profit``
+        from its ``campaign_dol`` (the campaign drawing-of-liquidity target). When a
+        field is genuinely absent (a legacy position with no carried geometry), it
+        falls back honestly — ``0.0`` entry / ``None`` levels — never a fabricated
+        value. With the ``mark_price=0.0`` ``build_status`` is called with, the
+        surfaced position ``pnl`` still derives to ``0.0`` (no mark-to-market on the
+        spot book yet) rather than inventing an unrealized number.
         """
         if not self._book:
             return PositionState()
         position = self._book[0]
+        entry = position.entry
         stop = position.stop
+        take_profit = position.campaign_dol
         return PositionState(
             side=Side.LONG,
             size=float(position.quantity),
-            entry_price=0.0,
+            entry_price=float(entry) if entry is not None else 0.0,
             stop_loss=float(stop) if stop is not None else None,
-            take_profit=None,
+            take_profit=float(take_profit) if take_profit is not None else None,
         )
 
     def get_account(self, *, mark_price: float) -> AccountState:

@@ -558,3 +558,79 @@ def test_paper_cycle_publishes_live_status_snapshot(tmp_path):
     assert len(snapshot["positions"]) == len(app.position_manager.book)
     assert isinstance(snapshot["halted"], bool)
     assert snapshot["halted"] is False  # a fresh, fully-funded session is not halted.
+
+
+def test_paper_status_snapshot_projects_real_entry_and_take_profit(tmp_path):
+    """An OPEN position's status projection must show the REAL entry/stop/take-profit.
+
+    The dashboard renders ``entry_price``/``stop_loss``/``take_profit`` from this
+    snapshot directly. A freshly-booked gold position (entry 100, stop 90, campaign
+    DOL 120) must surface those levels — NOT a hardcoded ``entry_price=0.0`` or a
+    ``take_profit=None`` (which left the dashboard showing "Entry 0.00 / TP —").
+    """
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    setup = AuthorizedSetup.example()  # entry 100, stop 90, campaign_dol 120
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        starting_equity=Decimal("10000"),
+    )
+
+    run_live(app, clock=_clock(now), max_iters=1)
+    assert len(app.position_manager.book) == 1
+
+    status_path = tmp_path / ".magic_agent" / "status.json"
+    snapshot = read_status_snapshot(status_path)
+    assert snapshot is not None
+    assert len(snapshot["positions"]) == 1
+    position = snapshot["positions"][0]
+    assert position["entry_price"] == 100.0, f"entry must be the setup entry, got {position!r}"
+    assert position["stop_loss"] == 90.0
+    assert position["take_profit"] == 120.0, f"take_profit must be campaign DOL, got {position!r}"
+
+
+def test_restarted_position_still_projects_real_entry_and_take_profit(tmp_path):
+    """A RESTARTED position must STILL project its real entry/take-profit.
+
+    Proves persistence carries ``entry`` (and ``campaign_dol``) across a restart: after
+    booking + persisting and rebuilding over the same base, the restored position's
+    status projection still shows entry 100 / stop 90 / take-profit 120 — not 0.0/None.
+    """
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()  # entry 100, stop 90, campaign_dol 120
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+
+    app1 = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        starting_equity=Decimal("10000"),
+    )
+    run_live(app1, clock=_clock(now1), max_iters=1)
+    assert len(app1.position_manager.book) == 1
+
+    # RESTART over the same base; the durable store must restore ``entry`` too.
+    app2 = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        starting_equity=Decimal("10000"),
+    )
+    assert len(app2.position_manager.book) == 1
+    assert app2.position_manager.book[0].entry == Decimal("100")
+
+    # Republish status over the restored book and assert the projection is intact.
+    app2.publish_status()
+    snapshot = read_status_snapshot(tmp_path / ".magic_agent" / "status.json")
+    assert snapshot is not None
+    assert len(snapshot["positions"]) == 1
+    position = snapshot["positions"][0]
+    assert position["entry_price"] == 100.0
+    assert position["stop_loss"] == 90.0
+    assert position["take_profit"] == 120.0

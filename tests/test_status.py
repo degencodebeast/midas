@@ -5,9 +5,12 @@ import json
 
 import pytest
 
+from decimal import Decimal
+
 from magic_agent.executor import PaperExecutor
 from magic_agent.models import Action, ExecutionIntent, Side
-from magic_agent.status import build_status
+from magic_agent.position_manager import ReconciledPosition
+from magic_agent.status import SpotStatusExecutor, build_status
 
 
 # ---------------------------------------------------------------------------
@@ -287,3 +290,64 @@ class TestJsonSerializable:
                 assert not isinstance(obj, Side), f"Found Side enum in result: {obj!r}"
 
         _check_no_enum(result)
+
+
+# ---------------------------------------------------------------------------
+# SpotStatusExecutor projection — real entry / stop / take-profit (not 0.0/None)
+# ---------------------------------------------------------------------------
+
+
+class TestSpotStatusExecutorProjection:
+    """An open spot book position must project its REAL entry/stop/take-profit.
+
+    The dashboard renders ``entry_price``/``stop_loss``/``take_profit`` from this
+    projection directly. A booked position carrying the setup geometry (entry 100,
+    stop 90, campaign DOL 120) must surface those values — NOT a hardcoded ``0.0``
+    entry or a ``None`` take-profit.
+    """
+
+    def _open_book(self) -> list[ReconciledPosition]:
+        return [
+            ReconciledPosition(
+                "intent:x",
+                Decimal("3"),
+                Decimal("10"),
+                symbol="ZEC/USDT",
+                identity_key="zec-bsc",
+                entry=Decimal("100"),
+                stop=Decimal("90"),
+                campaign_dol=Decimal("120"),
+            )
+        ]
+
+    def test_open_position_projects_real_entry_price(self):
+        executor = SpotStatusExecutor(
+            equity_usd=Decimal("10000"), cash_usd=Decimal("10000"), book=self._open_book()
+        )
+        pos = executor.get_position()
+        assert pos.entry_price == pytest.approx(100.0)
+
+    def test_open_position_projects_real_stop_loss(self):
+        executor = SpotStatusExecutor(
+            equity_usd=Decimal("10000"), cash_usd=Decimal("10000"), book=self._open_book()
+        )
+        pos = executor.get_position()
+        assert pos.stop_loss == pytest.approx(90.0)
+
+    def test_open_position_projects_campaign_dol_as_take_profit(self):
+        executor = SpotStatusExecutor(
+            equity_usd=Decimal("10000"), cash_usd=Decimal("10000"), book=self._open_book()
+        )
+        pos = executor.get_position()
+        assert pos.take_profit == pytest.approx(120.0)
+
+    def test_legacy_position_without_entry_falls_back_honestly(self):
+        """A position genuinely lacking geometry must NOT fabricate levels."""
+        book = [ReconciledPosition("intent:x", Decimal("3"))]
+        executor = SpotStatusExecutor(
+            equity_usd=Decimal("10000"), cash_usd=Decimal("10000"), book=book
+        )
+        pos = executor.get_position()
+        assert pos.entry_price == 0.0
+        assert pos.stop_loss is None
+        assert pos.take_profit is None
