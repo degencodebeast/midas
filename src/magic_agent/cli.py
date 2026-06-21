@@ -38,10 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     # source. Default MUST match `serve --log` so both processes share one file.
     run.add_argument("--log", default=".magic_agent/decisions.jsonl",
                      help="Path to the JSONL decision log (default: .magic_agent/decisions.jsonl)")
-    # Bound the loop for smoke runs / tests; None (default) runs until the clock
-    # raises StopIteration (a real live clock blocks instead).
+    # Bound the loop for smoke runs / tests; None (default) runs unbounded, pacing one
+    # cycle per closed H1 bar via the bar-close-aligned clock (no busy-spin).
     run.add_argument("--max-iters", type=int, default=None,
-                     help="Bound the number of cycles (default: unbounded)")
+                     help="Bound the number of cycles (default: unbounded, paced to closed H1 bars)")
     run.set_defaults(func=_cmd_run)
 
     sv = sub.add_parser("serve", help="Serve the read-only mission-control dashboard API")
@@ -61,24 +61,19 @@ def _cmd_run(args: argparse.Namespace) -> None:
     # decision input flows through the shared LifecycleEvaluator -> DecisionPipeline
     # inside run_cycle — the CLI never hand-builds DecisionInputs and never reaches
     # the scanner / RiskPolicy / coordinator directly.
-    from datetime import datetime, timedelta, timezone
-
     from magic_agent.app import build_app
-    from magic_agent.live import run_live
+    from magic_agent.live import make_bar_aligned_clock, run_live
 
     mode = "paper" if args.executor == "paper" else "twak"
     root_dir = getattr(args, "root_dir", None)
     app = build_app(mode=mode, root_dir=root_dir)
 
-    # A monotonic clock: each tick advances 5 minutes from the process start. For a
-    # bounded smoke run (`--max-iters`) this terminates deterministically; unbounded
-    # it ticks forever (a real live deployment swaps in a bar-close-aligned clock).
-    start = datetime.now(tz=timezone.utc)
-    counter = {"n": 0}
-
-    def clock() -> datetime:
-        counter["n"] += 1
-        return start + timedelta(minutes=5 * counter["n"])
+    # A bar-close-aligned clock: each cycle paces to the next closed H1 bar (the
+    # scanner doctrine is H1-closed-bar driven), so a bare `magic-agent run` waits
+    # for closed bars instead of busy-spinning. A bounded smoke run (`--max-iters`)
+    # still terminates after N cycles. `make_bar_aligned_clock`'s default sleep is
+    # `time.sleep`; tests inject a fake sleep so they never wait for real time.
+    clock = make_bar_aligned_clock()
 
     run_live(app, clock=clock, max_iters=getattr(args, "max_iters", None))
 

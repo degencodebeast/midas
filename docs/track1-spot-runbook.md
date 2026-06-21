@@ -241,12 +241,13 @@ must expose the following fields. Operators should monitor all of them:
 The following limitations are accepted and must be understood before live activation.
 They do NOT block paper mode but are material for live operation.
 
-**(a) CLI real-app assembly is a stub — live end-to-end is not yet wired or tested.**
-`cli._cmd_run()` raises `NotImplementedError` for the full spot runtime app assembly.
-Paper mode (`--executor paper`) is the validated surface exercised by tests and the
-paper cycle gate. Live wiring (`--executor twak`) requires completing the app-assembly
-stub in `cli.py` before any live order can be submitted. Do not attempt live trading
-until this stub is replaced with the full runtime assembly.
+**(a) Live (`--executor twak`) end-to-end is not yet wired or tested.**
+`cli._cmd_run()` assembles the full spot runtime app and runs paper mode now — a bare
+`magic-agent run` (paper default) paces one cycle per closed H1 bar via the
+bar-close-aligned clock (no busy-spin). Paper mode (`--executor paper`) is the validated
+surface exercised by tests and the paper cycle gate. Live wiring (`--executor twak`)
+still routes through the TWAK/coordinator path that is not yet exercised end-to-end; do
+not attempt live trading until that path is validated.
 
 **(b) x402 budget hardening is pending.**
 The current `X402Client` enforces a per-request and daily budget, but it does NOT yet:

@@ -11,14 +11,83 @@ with no network.
 
 Paper is the default execution mode: the ``app`` passed in by ``cli`` wires the paper
 adapter as the execution port unless live is explicitly opted into. ``max_iters`` bounds
-the loop so unit tests terminate; ``None`` runs until the clock raises ``StopIteration``
-(a real live clock blocks instead, so the bound is only needed for tests).
+the loop so unit tests terminate; ``None`` runs unbounded. The production clock built by
+``cli`` (:func:`make_bar_aligned_clock`) paces each cycle to the next closed H1 bar, so
+an unbounded run waits for closed bars instead of busy-spinning. A fake-clock test may
+instead raise ``StopIteration`` to end the loop deterministically.
 """
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 
 from magic_agent.runner import run_cycle
+
+# One closed H1 bar per cycle — the scanner doctrine is H1-closed-bar driven, so the
+# production clock paces to the top of each hour rather than busy-spinning.
+_H1 = timedelta(hours=1)
+
+
+def _floor_h1(now: datetime) -> datetime:
+    """Return the close of the most recently completed H1 bar at or before ``now``.
+
+    Args:
+        now: The current timestamp.
+
+    Returns:
+        ``now`` floored to the top of the hour (minute/second/microsecond zeroed).
+    """
+    return now.replace(minute=0, second=0, microsecond=0)
+
+
+def make_bar_aligned_clock(
+    *,
+    sleep: Callable[[float], None] = time.sleep,
+    now_fn: Callable[[], datetime] = lambda: datetime.now(tz=timezone.utc),
+) -> Callable[[], datetime]:
+    """Build a clock that paces each cycle to a closed H1 bar.
+
+    The scanner doctrine is H1-closed-bar driven, so this clock fires one cycle per
+    closed bar instead of busy-spinning:
+
+    - The FIRST call returns the close of the most recently completed H1 bar
+      immediately (no sleep) — on startup we act on the latest closed bar, so a
+      bounded smoke run (``--max-iters``) terminates without waiting a real hour.
+    - Each SUBSEQUENT call sleeps (via the injected ``sleep``) until the next H1
+      close and returns it.
+
+    Both ``sleep`` and ``now_fn`` are injectable so tests pass a fake sleep and a
+    controllable clock and assert the slept duration WITHOUT real waiting.
+
+    Args:
+        sleep: Callable invoked with a non-negative number of seconds to wait.
+            Defaults to :func:`time.sleep`.
+        now_fn: Callable returning the current timezone-aware ``datetime``. Defaults
+            to :func:`datetime.now` in UTC.
+
+    Returns:
+        A zero-arg clock callable returning a strictly increasing sequence of
+        H1-aligned bar closes, pacing to each next close.
+    """
+    state: dict[str, datetime | None] = {"last_close": None}
+
+    def clock() -> datetime:
+        now = now_fn()
+        last_close = state["last_close"]
+        if last_close is None:
+            # First cycle: act on the most recently closed bar immediately.
+            target = _floor_h1(now)
+        else:
+            # Subsequent cycles: wait for the next close after the one we returned.
+            target = last_close + _H1
+            wait_seconds = (target - now).total_seconds()
+            if wait_seconds > 0:
+                sleep(wait_seconds)
+        state["last_close"] = target
+        return target
+
+    return clock
 
 
 def run_live(app, *, clock: Callable[[], object], max_iters: int | None = None) -> int:
