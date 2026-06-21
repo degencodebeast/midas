@@ -69,10 +69,26 @@ class PositionManager:
         self.alert = alert
         self.book: list[ReconciledPosition] = []
 
-    def process_exits(self, now) -> None:
+    def process_exits(self, now) -> int:
+        """Drive protective exits for every open position this cycle.
+
+        Selects and executes any protective exit (full stop / campaign-DOL /
+        opposing-HTF close, or a partial risk reduction) through the shared
+        evaluator + pipeline, in stressed-loss precedence order. Entry halts are
+        ignored entirely here: a protective exit fires regardless of entry gating.
+
+        Returns:
+            The number of protective actions executed this cycle (full closes and
+            partial risk reductions). ``run_cycle`` reads this to enforce the
+            no-churn invariant: a cycle that executed ANY protective action is an
+            exit-only cycle and must NOT submit a new entry until the next cycle, so
+            the freed concurrency slot can never be re-used same-cycle. ``0`` means
+            no protective action ran (entries may proceed).
+        """
         ordered = sorted(
             self.positions(), key=lambda p: p.quantity * p.stressed_loss_per_unit, reverse=True,
         )
+        exits_executed = 0
         for position in ordered:
             reduction = self.risk_policy.reduction_for(position, self.risk_state())
             observation = self.observe(position, now, reduction)
@@ -91,6 +107,8 @@ class PositionManager:
                 self.alert("protective_exit_unquotable", position)
                 continue
             self.execute(position, decision, quote)
+            exits_executed += 1
+        return exits_executed
 
     def open_from_reconciliation(self, intent, position_qty: Decimal) -> ReconciledPosition:
         """Book a position from a reconciled on-chain buy.

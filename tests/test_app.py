@@ -324,6 +324,62 @@ def test_paper_round_trip_stop_hit_closes_position_and_frees_slot(tmp_path):
     assert len(app.position_manager.book) == 1
 
 
+def test_paper_exit_cycle_blocks_same_cycle_re_entry_even_when_scanner_authorizes(tmp_path):
+    """An exit cycle is an EXIT-ONLY cycle: a stop-close must not re-enter same-cycle.
+
+    Adversarial: the scanner ALWAYS authorizes (it returns a setup every cycle, even on
+    the bar that just stopped the position out). The runtime must NOT rely on the scanner
+    going silent on the stop bar to avoid churn — when ``process_exits`` closes a position
+    this cycle, ``run_cycle`` must defer any new entry to the NEXT cycle. Without the
+    guard, the freed concurrency slot is re-used in the SAME cycle: the close cycle books a
+    fresh position (instant re-entry / churn), so ``confirmed_records`` jumps from 1 to 2.
+
+    * Cycle 1: price in range -> book exactly one position (1 confirmed record).
+    * Cycle 2: H1 low hits the structural stop (90) -> the position CLOSES. Even though the
+      scanner still authorizes, NO new entry is booked this cycle: the book ends EMPTY and
+      ``confirmed_records`` stays at 1 (no churn).
+    * Cycle 3: no exit this cycle, still authorized -> a NEW entry IS allowed (2 confirmed).
+    """
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    now3 = now2 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()  # entry 100, stop 90, campaign_dol 120
+    # ALWAYS-AUTHORIZING scanner: returns a setup every cycle, even on the stop bar. The
+    # runtime must own the no-churn guard, not lean on the scanner going silent.
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+    frame_source = _ControllableFrameSource(low=Decimal("95"), high=Decimal("105"))
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        frame_source=frame_source,
+    )
+
+    # Cycle 1: price in range -> book exactly one position.
+    run_live(app, clock=_clock(now1), max_iters=1)
+    assert len(app.position_manager.book) == 1
+    assert len(app.execution_coordinator.confirmed_records()) == 1
+
+    # Cycle 2: H1 low hits the stop (90) -> the position CLOSES. The scanner STILL
+    # authorizes, but this is an exit-only cycle: no new entry is booked same-cycle.
+    frame_source.low = Decimal("89")
+    run_live(app, clock=_clock(now2), max_iters=1)
+    assert app.position_manager.book == []
+    assert len(app.position_manager.positions()) == 0
+    assert app.state.risk_state().open_strategy_positions == 0
+    # The load-bearing no-churn assert: the stop cycle did NOT open a fresh position.
+    # On buggy code this is 2 (close cycle re-entered same-cycle); the guard keeps it 1.
+    assert len(app.execution_coordinator.confirmed_records()) == 1
+
+    # Cycle 3: price back in range, no exit this cycle, still authorized -> a NEW entry
+    # IS allowed (deferred re-entry on a later, non-exit cycle is correct).
+    frame_source.low = Decimal("95")
+    run_live(app, clock=_clock(now3), max_iters=1)
+    assert len(app.position_manager.book) == 1
+    assert len(app.execution_coordinator.confirmed_records()) == 2
+
+
 def test_paper_round_trip_close_is_durable_across_restart(tmp_path):
     """After a stop-hit CLOSE, a restart must NOT resurrect the closed position.
 

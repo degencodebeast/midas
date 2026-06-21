@@ -11,6 +11,12 @@ Load-bearing safety invariants preserved here:
 * **Protective exits run first, unconditionally.** ``position_manager.process_exits``
   is called before any entry gating, so a halt (drawdown / consecutive-stop /
   concurrency) can never block a stop / campaign-DOL / risk-reduction exit.
+* **An exit cycle blocks same-cycle re-entry (no churn).** ``process_exits`` reports how
+  many protective actions it executed this cycle; if any fired, the entry-submission
+  phase is skipped and new entries defer to the next cycle. The freed concurrency slot
+  can never be re-used same-cycle, so a stop-out that still authorizes on the same bar
+  cannot close the old position and open a fresh one in one cycle. The runtime owns this
+  guard — it never relies on the scanner going silent on the stop bar.
 * **Mandatory RiskPolicy.** Missing policy raises ``RuntimeError`` — but only *after*
   protective exits have been processed, so fail-closed entry behavior cannot strand an
   open position.
@@ -33,11 +39,29 @@ from magic_agent.spot_models import ActionPurpose
 
 def run_cycle(app, now) -> None:
     app.reconcile_unfinished()
-    app.position_manager.process_exits(now)
+    # Protective exits run FIRST, unconditionally. ``process_exits`` returns how many
+    # protective actions (full closes / partial risk reductions) it executed this cycle.
+    exited = app.position_manager.process_exits(now)
     if app.state.blocks_new_exposure:
         return
     if app.risk_policy is None:
         raise RuntimeError("mandatory RiskPolicy is missing")
+    # No-churn invariant: an exit cycle is an EXIT-ONLY cycle. When a protective exit
+    # closed (or reduced) a position THIS cycle, the freed concurrency slot must NOT be
+    # re-used by a same-cycle entry — otherwise a stop-out that still authorizes on the
+    # same bar would close the old position AND open a fresh one in one cycle (instant
+    # re-entry / churn). The runtime owns this guard; it never relies on the scanner
+    # going silent on the stop bar. New entries defer to the NEXT cycle. The existing
+    # position's exit side-effects already ran above, and the end-of-cycle persistence
+    # (``state_journal.save`` + ``position_store.save``) still runs below so the close
+    # is durable and the loop stays consistent.
+    if exited:
+        if app.watchlist.state.discovery_due(now):
+            app.watchlist.mark_discovery(now)
+        app.compliance.observe(app.execution_journal.confirmed_records(), now)
+        app.state_journal.save(app.state.as_dict())
+        app.position_store.save(app.position_manager.book)
+        return
     cmc_batch = app.cmc_source.snapshot(now)
     snapshots = cmc_batch.snapshots
     app.exclusion_journal.append_many(cmc_batch.exclusions, now)
