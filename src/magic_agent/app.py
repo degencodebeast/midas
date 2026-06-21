@@ -256,12 +256,22 @@ def build_app(
     if gold_candidate_symbol is not None:
         registry = _GoldOverrideRegistry(registry, gold_candidate_symbol)
 
-    # State + journals.
-    state = RuntimeState.new_session(starting_equity)
+    # State + journals. Restore the persisted session if a journal exists so a
+    # restart preserves equity/drawdown anchors, the canary flag, the consecutive-
+    # stop count, and the exposure gate — an agent that has halted (or drawn down)
+    # must NOT silently resume from a fresh session. ``state_journal.load`` returns
+    # the inner ``as_dict()`` payload (sha256-verified), so it feeds ``from_dict``
+    # directly. A corrupt journal raises ``IntegrityError`` and is allowed to
+    # propagate: a tampered/damaged state file is an operator event, not a silent
+    # reset that could resume trading.
     chain_journal = ExecutionJournal(base / "executions.json")
     exclusion_journal = ExclusionJournal(base / "exclusions.jsonl")
     decision_journal = DecisionJournal(base / "decisions.jsonl")
     state_journal = StateJournal(base / "state.json")
+    if state_journal.path.exists():
+        state = RuntimeState.from_dict(state_journal.load())
+    else:
+        state = RuntimeState.new_session(starting_equity)
 
     # CMC candidate source (offline client by default).
     cmc_source = CmcCandidateSource(eligibility, registry, cmc_client or FixtureCmcClient())
