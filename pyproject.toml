@@ -36,7 +36,7 @@ build-backend = "uv_build"
 # can't drift under you (a `branch =` ref floats to HEAD on every re-lock — a `rev =`
 # sha does not). The scanner repo is PUBLIC — no token needed. Bump this sha
 # deliberately to pick up scanner changes (then re-run `uv lock`).
-magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "4ccd1a95b2b32262dbcffd7a920fcba5eb033f54" }
+magic-scanner = { git = "file:///Users/degencodebeast/Projects/personal/trading/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 # Local-dev override (editable sibling scanner): do NOT commit this uncommented.
 # After `uv sync`, run `uv pip install -e ../trading-scanner` to point at the local
 # checkout, or temporarily swap the source above to:
