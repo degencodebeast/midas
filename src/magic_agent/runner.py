@@ -1,115 +1,85 @@
-"""Loop body — one newly-closed candle at a time, stops checked FIRST.
+"""The spot runtime cycle — one decision pass through the shared pipeline.
 
-Pure orchestration: scanning, context, executor are all injected, so the whole loop
-runs in tests with no network. The live driver (cli.py) supplies a real fetch +
-new-candle gate (drop the forming bar, dedupe on timestamp) around ``on_candle``.
+This is the single loop body shared by every runtime mode (paper / live / replay):
+runner, live, and cli all route through it. The cycle wires the upstream modules
+into one fail-closed pass and **never hand-builds** :class:`DecisionInputs` — every
+decision input flows through ``LifecycleEvaluator -> DecisionInputs -> DecisionPipeline``
+(the pipeline rejects foreign-source inputs, so this is the only legitimate path).
+
+Load-bearing safety invariants preserved here:
+
+* **Protective exits run first, unconditionally.** ``position_manager.process_exits``
+  is called before any entry gating, so a halt (drawdown / consecutive-stop /
+  concurrency) can never block a stop / campaign-DOL / risk-reduction exit.
+* **Mandatory RiskPolicy.** Missing policy raises ``RuntimeError`` — but only *after*
+  protective exits have been processed, so fail-closed entry behavior cannot strand an
+  open position.
+* **Scanner is the sole setup authority.** ``scanner_gateway.scan`` owns the setup
+  decision; ``setup is None`` means no order (no campaign DOL / no stop -> no setup).
+* **Gold identity for execution.** A monitored-but-not-gold candidate
+  (``execution_eligible`` False) is journaled and skipped before any sizing.
+* **RiskPolicy + a fresh exact-size quote before submit.** ``executability.prepare_order``
+  delegates to ``prepare_exact_order``: it sizes via RiskPolicy and returns a fresh,
+  unexpired quote bound to ``risk.final_qty``. Only an approved prepared order proceeds.
+* **No optimistic booking.** Entries are submitted via ``execution_coordinator.submit``;
+  positions are booked only on the coordinator's reconcile path, never optimistically.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
-
-from magic_agent.context import CmcContextAdapter
-from magic_agent.decision import build_decision, clamp_advice, LlmAdvice, RISK_PCT_DEFAULT
-from magic_agent.executor import PerpExecutor
-from magic_agent.log import AgentLog, decision_record
-from magic_agent.models import (
-    Action, AgentDecision, Candle, GateVerdict, Outcome, PositionState, Setup, Side,
-)
+from magic_agent.cmc_selector import select_candidates
+from magic_agent.risk_policy import MarketRiskContext
+from magic_agent.spot_models import ActionPurpose
 
 
-def check_stops(position: PositionState, candle: Candle) -> bool:
-    """True if this candle's range touched the position's stop or target."""
-    if position.side is Side.FLAT:
-        return False
-    if position.side is Side.LONG:
-        return (position.stop_loss is not None and candle.low <= position.stop_loss) or (
-            position.take_profit is not None and candle.high >= position.take_profit
-        )
-    return (position.stop_loss is not None and candle.high >= position.stop_loss) or (
-        position.take_profit is not None and candle.low <= position.take_profit
+def run_cycle(app, now) -> None:
+    app.reconcile_unfinished()
+    app.position_manager.process_exits(now)
+    if app.state.blocks_new_exposure:
+        return
+    if app.risk_policy is None:
+        raise RuntimeError("mandatory RiskPolicy is missing")
+    cmc_batch = app.cmc_source.snapshot(now)
+    snapshots = cmc_batch.snapshots
+    app.exclusion_journal.append_many(cmc_batch.exclusions, now)
+    batch = app.candidate_source.enumerate(
+        now=now, watchlist=app.watchlist.state, snapshots=snapshots,
     )
-
-
-def on_candle(
-    executor: PerpExecutor,
-    *,
-    setup_fn: Callable[[], Setup | None],
-    context: CmcContextAdapter,
-    candle: Candle,
-    risk_pct: float = RISK_PCT_DEFAULT,
-    leverage: float = 1.0,
-    log: AgentLog | None = None,
-    now: str = "",
-    policy_config: "PolicyConfig | None" = None,
-    realized_pnl_today: float = 0.0,
-    advisor: "Callable[[Setup, ContextSnapshot], LlmAdvice | None] | None" = None,
-) -> tuple[AgentDecision, Outcome]:
-    # advisor audit fields — None on the pure-deterministic path (no advisor / no advice).
-    baseline_qty: float | None = None
-    llm_size_factor: float | None = None
-    llm_action_hint: str | None = None
-
-    # 1. Stops first — deterministic risk before anything else.
-    pos = executor.get_position()
-    if pos.side is not Side.FLAT and check_stops(pos, candle):
-        outcome = executor.close_position(mark_price=candle.close)
-        decision = AgentDecision(Action.CLOSE, None, GateVerdict(True, 0.0, "stop/target hit"),
-                                 "stop", "stop or target hit")
-        if log is not None:
-            from magic_agent.models import ContextSnapshot
-            log(decision_record(decision, ContextSnapshot("neutral", "low", "ok"), outcome,
-                                now=now, baseline_qty=baseline_qty,
-                                llm_size_factor=llm_size_factor, llm_action_hint=llm_action_hint))
-        return decision, outcome
-
-    # 2. Already in a position -> hold (one position at a time).
-    if pos.side is not Side.FLAT:
-        return AgentDecision(Action.HOLD, None, GateVerdict(False, 0.0, "in position"),
-                             "hold", "in position"), Outcome.SKIPPED_IN_POSITION
-
-    # 3. Signal -> context -> decision.
-    setup = setup_fn()
-    if setup is None:
-        return AgentDecision(Action.HOLD, None, GateVerdict(False, 0.0, "no setup"),
-                             "none", "no setup"), Outcome.NOOP
-
-    ctx = context.get_context(setup.symbol)
-    account = executor.get_account(mark_price=candle.close)
-    decision = build_decision(setup, ctx, account, risk_pct=risk_pct, leverage=leverage)
-
-    # Bounded AI seam: the advisor reaches the decision ONLY via clamp_advice, which
-    # guarantees size-down/wait-only — it can never un-veto, flip, or change geometry.
-    # baseline_qty/llm_* stay None on the pure-deterministic path (no advisor configured).
-    if advisor is not None:
-        baseline_qty = decision.intent.qty if decision.intent else None
-        advice = advisor(setup, ctx)
-        if advice is not None:
-            llm_size_factor = advice.size_factor
-            llm_action_hint = advice.action_hint
-            decision = clamp_advice(decision, advice)
-
-    if not decision.gate.allow:
-        outcome = Outcome.SKIPPED_VETO
-    elif decision.intent is None or decision.intent.qty <= 0:
-        outcome = Outcome.SKIPPED_ZERO_SIZE
-    else:
-        if policy_config is not None and decision.intent is not None:
-            from magic_agent.policy import PolicyState, run_policies
-            pstate = PolicyState(
-                equity=account.equity,
-                realized_pnl_today=realized_pnl_today,
-                open_positions=0 if executor.get_position().side is Side.FLAT else 1,
+    app.exclusion_journal.append_many(batch.exclusions, now)
+    fresh = {row.identity_key: row for row in select_candidates(list(snapshots.values()), now=now)}
+    for candidate in (*batch.monitoring, *batch.discovery):
+        setup = app.scanner_gateway.scan(candidate)
+        if setup is None:
+            continue
+        if candidate in batch.discovery:
+            app.watchlist.promote(candidate.symbol)
+        snapshot = candidate.snapshot
+        if not candidate.execution_eligible:
+            app.exclusion_journal.append_code(candidate.symbol, "identity_not_gold", now)
+            continue
+        if snapshot is None or fresh.get(snapshot.identity_key) is None:
+            app.exclusion_journal.append_code(candidate.symbol, "cmc_stale_or_vetoed", now)
+            continue
+        market = MarketRiskContext(
+            snapshot.momentum_7d, snapshot.momentum_7d_rank_pct,
+            snapshot.macro_clamp, app.state.canary_mode,
+        )
+        prepared = app.executability.prepare_order(
+            setup=setup, market=market,
+            risk_state=app.state.risk_state(), risk_policy=app.risk_policy,
+        )
+        if not prepared.approved:
+            continue
+        inputs = app.lifecycle_evaluator.evaluate(
+            app.observe_entry(setup, prepared.risk, now),
+        )
+        decision = app.pipeline.decide(inputs)
+        app.decision_journal.append(decision, now)
+        if decision.intent is not None:
+            app.execution_coordinator.submit(
+                decision.intent, quote=prepared.quote, policy=prepared.risk,
             )
-            verdict = run_policies(decision.intent, pstate, policy_config)
-            if not verdict.approved:
-                if log is not None:
-                    log(decision_record(decision, ctx, Outcome.SKIPPED_POLICY, now=now,
-                                        baseline_qty=baseline_qty, llm_size_factor=llm_size_factor,
-                                        llm_action_hint=llm_action_hint))
-                return decision, Outcome.SKIPPED_POLICY
-        outcome = executor.open_position(decision.intent)
-
-    if log is not None:
-        log(decision_record(decision, ctx, outcome, now=now, baseline_qty=baseline_qty,
-                            llm_size_factor=llm_size_factor, llm_action_hint=llm_action_hint))
-    return decision, outcome
+            break
+    if app.watchlist.state.discovery_due(now):
+        app.watchlist.mark_discovery(now)
+    app.compliance.observe(app.execution_journal.confirmed_records(), now)
+    app.state_journal.save(app.state.as_dict())

@@ -2,44 +2,52 @@
 from magic_agent.cli import build_parser
 
 
-def test_run_parses_symbol_executor_and_risk_defaults():
+# ---------------------------------------------------------------------------
+# Spot `run` parser: paper is the DEFAULT; twak is the only live executor choice
+# ---------------------------------------------------------------------------
+
+def test_run_defaults_to_paper_executor():
     p = build_parser()
     args = p.parse_args(["run", "--symbol", "BNB/USDT"])
     assert args.symbol == "BNB/USDT"
-    assert args.executor == "paper"      # safe default
-    assert args.risk_pct == 0.01
-    assert args.leverage == 1.0
+    assert args.executor == "paper"  # safe default — never live without opt-in
 
 
-def test_run_accepts_aster_executor_and_overrides():
+def test_run_accepts_twak_live_executor():
     p = build_parser()
-    args = p.parse_args(["run", "--symbol", "BNB/USDT", "--executor", "aster",
-                         "--risk-pct", "0.005", "--leverage", "5"])
-    assert args.executor == "aster" and args.risk_pct == 0.005 and args.leverage == 5.0
+    args = p.parse_args(["run", "--symbol", "BNB/USDT", "--executor", "twak"])
+    assert args.executor == "twak"
 
 
-def test_run_policy_flag_defaults_assemble_non_empty_config():
+def test_run_rejects_unknown_executor():
+    import pytest
+
+    p = build_parser()
+    with pytest.raises(SystemExit):
+        p.parse_args(["run", "--executor", "aster"])  # perp venue removed
+
+
+def test_run_has_no_leverage_or_short_options():
+    # Spot longs only: no leverage / short / aster configuration remains.
+    import pytest
+
+    p = build_parser()
+    args = p.parse_args(["run"])
+    assert not hasattr(args, "leverage")
+    assert not hasattr(args, "max_leverage")
+    # The perp leverage flag no longer parses at all.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["run", "--leverage", "5"])
+
+
+def test_run_subcommand_func_is_set():
     p = build_parser()
     args = p.parse_args(["run", "--symbol", "BNB/USDT"])
-    # Fail-closed defaults -> a non-empty PolicyConfig in _cmd_run.
-    assert args.max_daily_loss == 50.0
-    assert args.max_leverage == 5.0
-    assert args.require_stop is True
-    assert args.cooldown_seconds is None
-
-
-def test_run_policy_flags_overridable():
-    p = build_parser()
-    args = p.parse_args(["run", "--max-daily-loss", "25", "--max-leverage", "3",
-                         "--no-require-stop", "--cooldown-seconds", "30"])
-    assert args.max_daily_loss == 25.0
-    assert args.max_leverage == 3.0
-    assert args.require_stop is False
-    assert args.cooldown_seconds == 30.0
+    assert callable(args.func)
 
 
 # ---------------------------------------------------------------------------
-# L4: magic-agent serve + ASGI entry
+# serve + ASGI entry (dashboard — unchanged across the spot migration)
 # ---------------------------------------------------------------------------
 
 def test_serve_parses_port_and_log():
@@ -116,7 +124,7 @@ def test_build_serve_app_decisions_endpoint(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# F1: `magic-agent run` writes the decision log (live audit + dashboard feed)
+# `magic-agent run` log path matches `serve` log path (shared audit trail)
 # ---------------------------------------------------------------------------
 
 def test_run_log_default_matches_serve_default():
@@ -136,49 +144,14 @@ def test_run_log_overridable(tmp_path):
     assert args.log == log_path
 
 
-def test_build_run_kwargs_wires_log_and_policy_config(tmp_path):
-    """build_run_kwargs returns the run_live kwargs with `log` = AgentLog at
-    args.log and a NON-EMPTY (fail-closed) PolicyConfig — proving the live path
-    actually wires a decision log (was the hole `/api/decisions` couldn't see)."""
-    from pathlib import Path
-
-    from magic_agent.cli import build_parser, build_run_kwargs
-    from magic_agent.context import CmcContextAdapter
-    from magic_agent.executor import PaperExecutor
-    from magic_agent.log import AgentLog
-    from magic_agent.policy import PolicyConfig
-
-    log_path = str(tmp_path / "decisions.jsonl")
-    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--log", log_path])
-
-    executor = PaperExecutor(starting_equity=1000.0)
-    kwargs = build_run_kwargs(
-        args,
-        executor=executor,
-        gateway=object(),
-        context=CmcContextAdapter(None),
-        feed=lambda symbol: (None, None),
-    )
-
-    # log is a real AgentLog pointing at args.log
-    assert isinstance(kwargs["log"], AgentLog)
-    assert kwargs["log"]._path == Path(log_path)
-    # policy_config is a NON-EMPTY PolicyConfig (fail-closed: run_policies won't raise)
-    assert isinstance(kwargs["policy_config"], PolicyConfig)
-    assert kwargs["policy_config"].active()  # non-empty
-    # symbol/executor/feed are forwarded so run_live(**kwargs) is callable
-    assert kwargs["symbol"] == "BNB/USDT"
-    assert kwargs["executor"] is executor
-
-
 # ---------------------------------------------------------------------------
-# F4: serve reads the live status snapshot (run writes, serve reads)
+# serve reads the live status snapshot (run writes, serve reads)
 # ---------------------------------------------------------------------------
 
 def test_build_serve_app_reads_seeded_snapshot_not_demo(tmp_path):
     """When a status snapshot file is present, build_serve_app's default provider
-    returns THAT snapshot (the live `run` process's state) — NOT the detached demo
-    PaperExecutor. This is the cross-process fix."""
+    returns THAT snapshot (the live `run` process's state) — NOT a detached demo.
+    This is the cross-process fix."""
     import json
     from fastapi.testclient import TestClient
     from magic_agent.cli import build_serve_app
@@ -226,211 +199,3 @@ def test_build_serve_app_absent_snapshot_falls_back_to_demo(tmp_path):
     assert data["mode"] == "demo"
     assert "equity" in data
     assert "positions" in data
-
-
-def test_run_writer_and_serve_reader_share_one_snapshot_path():
-    """The `run` writer (build_run_kwargs) and the `serve` reader (build_serve_app)
-    MUST resolve to the SAME snapshot path, or `serve` silently reverts to the demo
-    fallback in production. Both derive from status_store.DEFAULT_STATUS_PATH."""
-    import inspect
-
-    from magic_agent.cli import build_parser, build_run_kwargs, build_serve_app
-    from magic_agent.context import CmcContextAdapter
-    from magic_agent.executor import PaperExecutor
-
-    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT"])
-    writer_path = build_run_kwargs(
-        args,
-        executor=PaperExecutor(starting_equity=1000.0),
-        gateway=object(),
-        context=CmcContextAdapter(None),
-        feed=lambda symbol: (None, None),
-    )["snapshot_path"]
-    reader_default = inspect.signature(build_serve_app).parameters["snapshot_path"].default
-    assert writer_path == reader_default
-
-
-def test_build_run_kwargs_run_live_writes_a_decision_record(tmp_path):
-    """End-to-end-ish: feed build_run_kwargs's output (with a real AgentLog) into
-    run_live with a fake feed yielding ONE allowed setup → a JSON line lands in the
-    log file (proves the live path writes records `/api/decisions` can read)."""
-    import json
-
-    from magic_agent.cli import build_parser, build_run_kwargs
-    from magic_agent.context import CmcContextAdapter
-    from magic_agent.executor import PaperExecutor
-    from magic_agent.live import run_live
-    from magic_agent.models import Candle, Setup, Side
-
-    log_path = tmp_path / "decisions.jsonl"
-    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--log", str(log_path)])
-
-    allowed_setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on",
-                          600.0, 588.0, 636.0, "chained_scob")
-
-    class _FakeGateway:
-        def scan(self, symbol):
-            return allowed_setup
-
-    pairs = iter([(Candle(600, 601, 599, 600), 1000)])
-
-    def feed(symbol):
-        return next(pairs)
-
-    kwargs = build_run_kwargs(
-        args,
-        executor=PaperExecutor(starting_equity=1000.0),
-        gateway=_FakeGateway(),
-        context=CmcContextAdapter(None),
-        feed=feed,
-    )
-
-    run_live(**kwargs, max_iters=1)
-
-    # The log file now exists and holds at least one valid JSON decision line.
-    assert log_path.exists()
-    lines = [ln for ln in log_path.read_text().splitlines() if ln.strip()]
-    assert len(lines) >= 1
-    rec = json.loads(lines[0])
-    assert "action" in rec and "outcome" in rec
-
-
-# ---------------------------------------------------------------------------
-# L5: optional bounded LLM advisor flag (default off = deterministic)
-# ---------------------------------------------------------------------------
-
-def test_run_advisor_defaults_off():
-    """`run` without --advisor => advisor disabled (pure deterministic path)."""
-    p = build_parser()
-    args = p.parse_args(["run", "--symbol", "BNB/USDT"])
-    assert args.advisor is False
-
-
-def test_run_advisor_flag_parses():
-    """`run --advisor` => advisor enabled."""
-    p = build_parser()
-    args = p.parse_args(["run", "--symbol", "BNB/USDT", "--advisor"])
-    assert args.advisor is True
-
-
-def test_build_run_kwargs_advisor_off_is_none():
-    """When --advisor is off, build_run_kwargs sets advisor=None (deterministic)."""
-    from magic_agent.cli import build_parser, build_run_kwargs
-    from magic_agent.context import CmcContextAdapter
-    from magic_agent.executor import PaperExecutor
-
-    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT"])
-    sentinel = object()
-
-    def _factory():
-        return sentinel  # would be used only if the flag were on
-
-    kwargs = build_run_kwargs(
-        args,
-        executor=PaperExecutor(starting_equity=1000.0),
-        gateway=object(),
-        context=CmcContextAdapter(None),
-        feed=lambda symbol: (None, None),
-        advisor_factory=_factory,
-    )
-    assert kwargs["advisor"] is None  # off => deterministic, factory NOT called
-
-
-def test_build_run_kwargs_advisor_on_uses_factory():
-    """When --advisor is on, build_run_kwargs wires the advisor from the factory."""
-    from magic_agent.cli import build_parser, build_run_kwargs
-    from magic_agent.context import CmcContextAdapter
-    from magic_agent.executor import PaperExecutor
-
-    args = build_parser().parse_args(["run", "--symbol", "BNB/USDT", "--advisor"])
-    sentinel = object()
-
-    kwargs = build_run_kwargs(
-        args,
-        executor=PaperExecutor(starting_equity=1000.0),
-        gateway=object(),
-        context=CmcContextAdapter(None),
-        feed=lambda symbol: (None, None),
-        advisor_factory=lambda: sentinel,
-    )
-    assert kwargs["advisor"] is sentinel  # on => the (injected) advisor is wired
-
-
-# ---------------------------------------------------------------------------
-# L5b: real Anthropic-backed advisor factory (env-config, None-fail-safe)
-# ---------------------------------------------------------------------------
-
-def test_default_advisor_factory_no_key_returns_none(monkeypatch):
-    """No API key in env => factory returns None => deterministic path (the SAFE
-    default; NOT a pass-through stub). No network, no SDK call."""
-    from magic_agent.cli import _default_advisor_factory
-
-    monkeypatch.delenv("MAGIC_AGENT_LLM_API_KEY", raising=False)
-
-    # client_maker must NOT be invoked when there is no key.
-    def _exploding_maker(*, api_key, model):  # pragma: no cover - must not run
-        raise AssertionError("client_maker called despite missing API key")
-
-    advisor = _default_advisor_factory(client_maker=_exploding_maker)
-    assert advisor is None
-
-
-def test_default_advisor_factory_with_key_wires_real_llm_advisor(monkeypatch):
-    """API key present => factory returns an LlmAdvisor wired to the client built by
-    the (injected) client_maker — tested with a FAKE maker, so NO network/SDK call.
-    The returned advisor parses the fake client's valid JSON into the right advice."""
-    from magic_agent.advisor import DEFAULT_DOCTRINE, LlmAdvisor
-    from magic_agent.cli import _default_advisor_factory
-    from magic_agent.decision import LlmAdvice
-    from magic_agent.models import ContextSnapshot, Setup, Side
-
-    monkeypatch.setenv("MAGIC_AGENT_LLM_API_KEY", "sk-test-key")
-    monkeypatch.setenv("MAGIC_AGENT_LLM_MODEL", "claude-test-model")
-
-    captured = {}
-
-    def _fake_maker(*, api_key, model):
-        captured["api_key"] = api_key
-        captured["model"] = model
-
-        def _fake_client(system_prompt: str, user_prompt: str) -> str:
-            captured["system_prompt"] = system_prompt
-            return '{"action": "wait", "size_factor": 0.5, "reasoning": "trim"}'
-
-        return _fake_client
-
-    advisor = _default_advisor_factory(client_maker=_fake_maker)
-    assert isinstance(advisor, LlmAdvisor)
-    # env was threaded into the maker
-    assert captured["api_key"] == "sk-test-key"
-    assert captured["model"] == "claude-test-model"
-
-    # The advisor actually drives the wired (fake) client and parses its output.
-    setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on", 600.0, 588.0, 636.0, "chained_scob")
-    context = ContextSnapshot(regime="risk_off", risk_flag="elevated", status="ok")
-    advice = advisor(setup, context)
-    assert isinstance(advice, LlmAdvice)
-    assert advice.action_hint == "wait"
-    assert advice.size_factor == 0.5
-    # Uses the operating doctrine system prompt (unchanged advisor behavior).
-    assert captured["system_prompt"] == DEFAULT_DOCTRINE
-
-
-def test_default_advisor_factory_failure_fallback_is_none_not_wait(monkeypatch):
-    """When the wired client raises (e.g. network down), the advisor returns None
-    (deterministic wins) — it does NOT fabricate a 'wait'. Safety invariant."""
-    from magic_agent.cli import _default_advisor_factory
-    from magic_agent.models import ContextSnapshot, Setup, Side
-
-    monkeypatch.setenv("MAGIC_AGENT_LLM_API_KEY", "sk-test-key")
-
-    def _boom_maker(*, api_key, model):
-        def _boom_client(system_prompt: str, user_prompt: str) -> str:
-            raise RuntimeError("network down")
-
-        return _boom_client
-
-    advisor = _default_advisor_factory(client_maker=_boom_maker)
-    setup = Setup("BNB/USDT", Side.LONG, "A", "risk_on", 600.0, 588.0, 636.0, "chained_scob")
-    context = ContextSnapshot(regime="risk_off", risk_flag="elevated", status="ok")
-    assert advisor(setup, context) is None  # None, NOT a 'wait' advice
