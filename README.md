@@ -1,36 +1,50 @@
 # MIDAS — bounded autonomous ICT/SMC trading agent
 
-`magic-agent` is a bounded autonomous trading agent. It drives a poll loop
-(`magic-agent run`), serves a read-only API (`magic-agent serve`), and renders a
+`magic-agent` is a bounded autonomous trading agent. It will drive a poll loop
+(`magic-agent run`), serve a read-only API (`magic-agent serve`), and render a
 dashboard from `web/`. The LLM advisor is off by default, key-gated, clamp-only,
 and returns `None` on failure; policy is fail-closed.
 
+**Current status:** the component runtime and paper execution logic are implemented
+and unit-tested (227 tests pass). However, end-to-end run-assembly — the production
+`App` object, `cli._cmd_run`, and `reconcile_unfinished` — is **not yet implemented**,
+so `magic-agent run` cannot be launched in any mode today (`cli._cmd_run` raises
+`NotImplementedError`). This is tracked as the next task. See
+[`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md) for the activation runbook
+and known limitations.
+
 ## Install (deployable)
 
-A fresh machine needs only this repo checked out — no sibling `trading-scanner`
-checkout is required. The scanner is pulled from a git source **pinned to an
-immutable commit** (`rev = <sha>`), so installs are reproducible and the resolved
-source can't drift to a new branch HEAD under you.
-
-```bash
-uv sync                       # installs magic-agent + the commit-pinned scanner
-uv run magic-agent run --executor paper
-uv run magic-agent serve --host 127.0.0.1 --port 8000
-```
-
 The scanner (`magic_scanner.scan.scan_symbols`) is declared in `pyproject.toml`
-as a commit-pinned git dependency (bump the `rev` deliberately, then `uv lock`,
-to pick up newer scanner changes):
+as a commit-pinned dependency (bump the `rev` deliberately, then `uv lock`,
+to pick up newer scanner changes).
+
+**Current pin:** engine commit `5f92552e8fdd688808e2709eefc176ab681b7f4f`, declared
+as a machine-local `file://` source:
 
 ```toml
 [tool.uv.sources]
-magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "4ccd1a95b2b32262dbcffd7a920fcba5eb033f54" }
+magic-scanner = { git = "file:///Users/.../trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 ```
 
-That repo is **public**, so no GitHub token is needed for a clean VPS install.
-(If it were private, the VPS would need a token, e.g. a `GIT_*`/credential
-helper or `git config url."https://<TOKEN>@github.com/".insteadOf` so `uv` can
-fetch it.)
+This means the sibling `../trading-scanner` checkout **must be present** on the same
+machine. The `file://` form is valid for local development but will fail on any other
+machine (VPS, CI, collaborators). Before deploying to a VPS: push commit `5f92552` to
+`github.com/degencodebeast/trading-scanner` and switch `pyproject.toml` to the
+`git+https` form:
+
+```toml
+magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
+```
+
+Then run `uv lock` and commit both files. That repo is **public**, so no GitHub token
+is needed for a clean VPS install. See Known limitation (d) in
+[`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md).
+
+```bash
+uv sync                       # installs magic-agent + the commit-pinned scanner
+uv run magic-agent serve --host 127.0.0.1 --port 8000
+```
 
 ### Optional: ERC-8004 on-chain identity (`[identity]` extra)
 
@@ -78,7 +92,9 @@ honestly to `status="unavailable"`, and the deterministic scanner path stands on
 
 ### Local dev: editable sibling scanner
 
-Workspace devs who want the local editable scanner can override after sync:
+The committed pin is already a `file://` local source, so `uv sync` resolves the
+scanner from the sibling `../trading-scanner` checkout at the pinned commit. If you
+want a fully editable (live-code) install instead, run:
 
 ```bash
 uv sync
@@ -86,9 +102,9 @@ uv pip install -e ../trading-scanner   # point magic_scanner at the local checko
 ```
 
 Alternatively, temporarily swap the committed `[tool.uv.sources]` entry for the
-commented `path = "../trading-scanner", editable = true` form in
-`pyproject.toml` — but do **not** commit that; the committed source must remain
-the commit-pinned git source so the deployable install stays self-contained.
+`path = "../trading-scanner", editable = true` form in `pyproject.toml` — but do
+**not** commit that; before VPS deploy the source must be changed to the `git+https`
+form at the pushed `5f92552` commit (see Install section above).
 
 ## Shared local state
 
@@ -106,12 +122,17 @@ Both processes must run with the same working directory.
 
 ### Execution modes
 
-Paper is the **default and the only validated surface** — a bare `magic-agent run`
-wires `PaperExecutionAdapter` (simulated fills, no funds, full decision logging).
+Paper is the **intended default and only validated surface** — a bare `magic-agent run`
+will wire `PaperExecutionAdapter` (simulated fills, no funds, full decision logging).
 Live execution (`--executor twak`) is an explicit opt-in and requires completing every
 gate in the [activation runbook](docs/track1-spot-runbook.md) first.
 
+**Note:** `magic-agent run` is not yet launchable in any mode — `cli._cmd_run` raises
+`NotImplementedError` (end-to-end run-assembly is the next task). The paper and live
+commands below show the intended interface once run-assembly is complete:
+
 ```bash
+# NOT YET FUNCTIONAL — pending run-assembly task
 uv run magic-agent run                   # paper (default — safe, no funds)
 uv run magic-agent run --executor twak  # live — all activation gates must be met first
 ```
