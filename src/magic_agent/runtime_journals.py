@@ -150,15 +150,37 @@ class ExclusionJournal:
                 fh.write(line + "\n")
 
 
+def _to_float(value: Decimal | None) -> float | None:
+    """Convert a Decimal display value to a JSON number (``None`` passes through).
+
+    This is a *display* projection for the dashboard, not money math: the
+    string round-trip (``float(str(value))``) keeps the shortest exact decimal
+    representation without re-introducing binary float artefacts beyond the
+    final ``float`` cast.
+    """
+    if value is None:
+        return None
+    return float(str(value))
+
+
 class DecisionJournal:
     """Append-only JSONL writer for ``PipelineDecision`` records.
 
-    Each call to :meth:`append` writes one JSON line containing the
-    decision's ``action``, ``reason``, ``reason_codes`` (list),
-    ``exit_quantity`` (string for Decimal exactness), ``intent_id``
-    (string when present, ``null`` when ``intent`` is ``None``),
-    ``symbol`` (from ``intent.setup.symbol`` when present, else
-    ``null``), and ``observed_at``.
+    Each call to :meth:`append` writes one JSON line. The record carries two
+    overlapping families of fields:
+
+    * **Back-compat audit fields** — ``action``, ``reason``,
+      ``reason_codes`` (list), ``exit_quantity`` (string for Decimal
+      exactness), ``intent_id`` (string when present, ``null`` when
+      ``intent`` is ``None``), ``symbol`` (from ``intent.setup.symbol``
+      when present, else ``null``), and ``observed_at``.
+    * **Dashboard-renderable fields** — the exact field NAMES the frontend
+      ``Decision`` interface reads (``ts``, ``setup_ref``, ``allow``,
+      ``qty``, ``entry``, ``stop_loss``, ``take_profit``, ``regime``,
+      ``gate_reason``, ``reasoning``) plus scanner provenance
+      (``raw_grade``, ``effective_grade``, ``grade_promotion_reason``).
+      Display numbers are JSON numbers (Decimal projected to float); setup-
+      derived fields are ``null`` for non-entry/hold decisions.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -173,22 +195,63 @@ class DecisionJournal:
 
         Args:
             decision: The resolved :class:`~magic_agent.decision_pipeline.PipelineDecision`.
-            now: Observation timestamp; serialized as ``isoformat()``.
+            now: Observation timestamp; serialized as ``isoformat()`` (emitted
+                under both ``observed_at`` and the frontend's ``ts``).
         """
         intent_id: str | None = None
         symbol: str | None = None
+        setup_ref: str | None = None
+        qty: float | None = None
+        entry: float | None = None
+        stop_loss: float | None = None
+        take_profit: float | None = None
+        regime: str | None = None
+        raw_grade: str | None = None
+        effective_grade: str | None = None
+        grade_promotion_reason: str | None = None
+
         if decision.intent is not None:
-            intent_id = decision.intent.intent_id
-            symbol = decision.intent.setup.symbol
+            intent = decision.intent
+            setup = intent.setup
+            intent_id = intent.intent_id
+            symbol = setup.symbol
+            # Prefer the structural setup id; fall back to the QML id.
+            setup_ref = setup.setup_id or setup.qml_id
+            qty = _to_float(intent.quantity)
+            entry = _to_float(setup.entry)
+            stop_loss = _to_float(setup.structural_stop)
+            take_profit = _to_float(setup.campaign_dol)
+            regime = setup.bias_alignment
+            raw_grade = setup.raw_grade
+            effective_grade = setup.grade
+            grade_promotion_reason = setup.grade_promotion_reason
+
+        timestamp = now.isoformat()
+        reasoning = ", ".join((decision.reason, *decision.reason_codes))
 
         record = {
+            # Back-compat audit fields.
             "action": decision.action,
             "exit_quantity": str(decision.exit_quantity),
             "intent_id": intent_id,
-            "observed_at": now.isoformat(),
+            "observed_at": timestamp,
             "reason": decision.reason,
             "reason_codes": list(decision.reason_codes),
             "symbol": symbol,
+            # Dashboard-renderable fields (frontend Decision interface names).
+            "allow": decision.intent is not None,
+            "effective_grade": effective_grade,
+            "entry": entry,
+            "gate_reason": decision.reason,
+            "grade_promotion_reason": grade_promotion_reason,
+            "qty": qty,
+            "raw_grade": raw_grade,
+            "reasoning": reasoning,
+            "regime": regime,
+            "setup_ref": setup_ref,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "ts": timestamp,
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as fh:

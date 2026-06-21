@@ -429,6 +429,176 @@ class TestDecisionJournalAppend:
 
 
 # ---------------------------------------------------------------------------
+# DecisionJournal – dashboard-renderable fields (frontend field names)
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionJournalDashboardFields:
+    """The dashboard ``Decision`` interface reads ``ts``/``setup_ref``/etc.
+
+    These tests assert the enriched record builder emits the field NAMES the
+    frontend (web/app/page.tsx) already reads, populated from the real
+    decision/intent/setup attributes.
+    """
+
+    def _entry_decision(self):
+        from magic_agent.spot_models import ActionPurpose, AuthorizedSetup, SpotIntent
+
+        setup = AuthorizedSetup.example(
+            symbol="ZEC/USDT",
+            entry=Decimal("100"),
+            structural_stop=Decimal("90"),
+            campaign_dol=Decimal("120"),
+            bias_alignment="aligned",
+            raw_grade="B",
+            grade="A",
+            grade_promotion_reason="dol_confirmed",
+        )
+        intent = SpotIntent(
+            "intent:setup-1", setup, Decimal("10"), "buy", ActionPurpose.STRATEGY
+        )
+        return PipelineDecision(
+            action="enter",
+            intent=intent,
+            reason="authorized",
+            reason_codes=("authorized",),
+        )
+
+    def _hold_decision(self) -> PipelineDecision:
+        return PipelineDecision(
+            action="hold",
+            intent=None,
+            reason="no_scanner_authorization",
+            reason_codes=("no_scanner_authorization",),
+        )
+
+    def test_entry_row_has_ts_from_observed_at(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["ts"] == _TS.isoformat()
+
+    def test_entry_row_has_action(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["action"] == "enter"
+
+    def test_entry_row_allow_is_true(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["allow"] is True
+
+    def test_entry_row_has_setup_ref(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["setup_ref"] == "setup-1"
+
+    def test_entry_row_has_qty_as_number(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["qty"] == 10.0
+        assert isinstance(rec["qty"], float)
+
+    def test_entry_row_has_entry_stop_target_as_numbers(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["entry"] == 100.0
+        assert rec["stop_loss"] == 90.0
+        assert rec["take_profit"] == 120.0
+        assert isinstance(rec["entry"], float)
+
+    def test_entry_row_has_regime(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["regime"] == "aligned"
+
+    def test_entry_row_has_gate_reason_and_reasoning(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["gate_reason"] == "authorized"
+        assert "authorized" in rec["reasoning"]
+
+    def test_entry_row_has_scanner_provenance(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._entry_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["raw_grade"] == "B"
+        assert rec["effective_grade"] == "A"
+        assert rec["grade_promotion_reason"] == "dol_confirmed"
+
+    def test_hold_row_has_ts_action_gate_reason(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._hold_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["ts"] == _TS.isoformat()
+        assert rec["action"] == "hold"
+        assert rec["gate_reason"] == "no_scanner_authorization"
+
+    def test_hold_row_allow_is_false(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._hold_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["allow"] is False
+
+    def test_hold_row_setup_fields_are_null(self, tmp_path):
+        from magic_agent.runtime_journals import DecisionJournal
+
+        journal = DecisionJournal(tmp_path / "decisions.jsonl")
+        journal.append(self._hold_decision(), _TS)
+
+        rec = _load_lines(tmp_path / "decisions.jsonl")[0]
+        assert rec["setup_ref"] is None
+        assert rec["qty"] is None
+        assert rec["entry"] is None
+        assert rec["stop_loss"] is None
+        assert rec["take_profit"] is None
+        assert rec["regime"] is None
+        assert rec["raw_grade"] is None
+        assert rec["effective_grade"] is None
+        assert rec["grade_promotion_reason"] is None
+
+
+# ---------------------------------------------------------------------------
 # DecisionJournal – accumulation (no truncation)
 # ---------------------------------------------------------------------------
 
