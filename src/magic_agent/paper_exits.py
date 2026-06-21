@@ -22,7 +22,7 @@ rebuilt via reconcile/balances), a deliberate follow-on — NOT wired here.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -138,8 +138,6 @@ class PaperExitPorts:
             decision: The pipeline decision (carries ``exit_quantity``).
             quote: The approved paper sell quote (no funds move).
         """
-        from magic_agent.position_manager import ReconciledPosition
-
         try:
             index = self._book.index(position)
         except ValueError:
@@ -149,17 +147,13 @@ class PaperExitPorts:
         if decision.exit_quantity >= position.quantity:
             del self._book[index]
             return
-        # Partial risk reduction: shrink the position in place, keep it open.
+        # Partial risk reduction: shrink the position in place, keep it open. Use
+        # ``dataclasses.replace`` so EVERY other field carries through unchanged
+        # (entry, stop, campaign_dol, symbol, identity_key, stressed_loss_per_unit,
+        # intent_id) — reconstructing the position field-by-field dropped ``entry``,
+        # regressing the dashboard projection to a fake "Entry 0.00" after a reduce.
         remaining = position.quantity - decision.exit_quantity
-        self._book[index] = ReconciledPosition(
-            position.intent_id,
-            remaining,
-            position.stressed_loss_per_unit,
-            symbol=position.symbol,
-            identity_key=position.identity_key,
-            stop=position.stop,
-            campaign_dol=position.campaign_dol,
-        )
+        self._book[index] = replace(position, quantity=remaining)
 
     def _bar_low_high(self, position) -> tuple[Decimal | None, Decimal | None]:
         """Resolve the position's latest closed bar low/high from the frame source.
