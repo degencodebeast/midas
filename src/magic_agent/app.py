@@ -182,9 +182,65 @@ class App:
     # open book is the chain's truth (rebuilt via reconcile/balances), a separate
     # follow-on.
     position_store: PositionStore
+    # The run mode ("paper"/"twak"), surfaced verbatim as the dashboard status
+    # ``mode`` so the live snapshot is never the "demo" fallback.
+    mode: str = "paper"
+    # Base dir for the .magic_agent journal tree. The live status snapshot is
+    # published to ``status_dir / "status.json"`` each cycle — the SAME file the
+    # ``serve`` /api/status reader loads (status_store.DEFAULT_STATUS_PATH).
+    status_dir: Path | None = None
+    # ERC-8004 on-chain agent identity, surfaced as the dashboard ``agent_id``.
+    # ``None`` when unregistered — the UI shows an honest "unregistered" badge,
+    # never a fabricated id. Not wired in paper yet (a deliberate follow-on).
+    agent_id: str | None = None
     # The real chain journal recovery scans (.records). Bound here so
     # reconcile_unfinished closes over it; never read by run_cycle directly.
     _chain_journal: ExecutionJournal = None  # type: ignore[assignment]
+
+    def publish_status(self) -> None:
+        """Publish a live status snapshot for the dashboard's /api/status reader.
+
+        Builds the ``build_status``-shaped dict from the LIVE runtime (equity/cash
+        from :class:`RuntimeState`, the open longs from the position-manager book,
+        the kill-switch from :func:`status.derive_spot_halted`) and writes it to
+        ``status_dir / "status.json"`` — the same file ``serve`` reads. A no-op when
+        ``status_dir`` is unset (e.g. a hand-assembled test App), so the publish is
+        purely additive and never breaks an App that did not opt into it.
+        """
+        if self.status_dir is None:
+            return
+        from magic_agent.status import (
+            SpotStatusExecutor,
+            build_status,
+            derive_spot_halted,
+        )
+        from magic_agent.status_store import write_status_snapshot
+
+        book = self.position_manager.book
+        executor = SpotStatusExecutor(
+            equity_usd=self.state.equity_usd,
+            cash_usd=self.state.cash_usd,
+            book=book,
+        )
+        # Label the position with the open long's symbol when one is booked, else a
+        # neutral "spot" placeholder (no symbol to surface when flat).
+        symbol = book[0].symbol if book and book[0].symbol else "spot"
+        # Realized-cash baseline = current cash: the spot book tracks no separate
+        # realized-PnL series yet, so realized_pnl derives to 0.0 (a truthful zero,
+        # not a fabricated figure). open_pnl is 0.0 too (no MTM on the book).
+        snapshot = build_status(
+            executor,
+            symbol=symbol,
+            mode=self.mode,
+            venue=self.mode,
+            mark_price=0.0,
+            starting_equity=float(self.state.cash_usd),
+            halted=derive_spot_halted(self.state, self.risk_policy),
+            daily_loss=None,
+            max_daily_loss=None,
+            agent_id=self.agent_id,
+        )
+        write_status_snapshot(self.status_dir / "status.json", snapshot)
 
     def reconcile_unfinished(self) -> None:
         """Fail closed if a prior on-chain swap survived a restart unfinished.
@@ -388,6 +444,10 @@ def build_app(
         execution_journal=paper_adapter,
         state_journal=state_journal,
         position_store=position_store,
+        mode=mode,
+        # Publish the live status snapshot under the SAME .magic_agent base the
+        # serve /api/status reader loads, so the dashboard reflects live paper data.
+        status_dir=base,
         _chain_journal=chain_journal,
     )
 

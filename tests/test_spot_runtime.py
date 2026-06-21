@@ -79,6 +79,9 @@ def _app(*, authorized: bool, policy_present: bool = True, execution_eligible: b
         execution_journal=SimpleNamespace(confirmed_records=lambda: executions),
         state_journal=SimpleNamespace(save=lambda payload: None),
         position_store=SimpleNamespace(save=lambda positions: None),
+        # run_cycle publishes a live status snapshot at each end-of-cycle save point;
+        # the fake app stubs it out (no dashboard file in these pipeline-shape tests).
+        publish_status=lambda: None,
     )
     return app, executions, alerts, now
 

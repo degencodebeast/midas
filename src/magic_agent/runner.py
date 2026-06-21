@@ -61,6 +61,9 @@ def run_cycle(app, now) -> None:
         app.compliance.observe(app.execution_journal.confirmed_records(), now)
         app.state_journal.save(app.state.as_dict())
         app.position_store.save(app.position_manager.book)
+        # Publish the live status snapshot alongside the persisted state so the
+        # dashboard reflects the post-exit book this cycle (consistent with the save).
+        app.publish_status()
         return
     cmc_batch = app.cmc_source.snapshot(now)
     snapshots = cmc_batch.snapshots
@@ -112,3 +115,7 @@ def run_cycle(app, now) -> None:
     # exit that dropped a position from the book decrements the durable count too.
     # Paper-mode mechanism only — in live the open book is the chain's truth.
     app.position_store.save(app.position_manager.book)
+    # Publish the live status snapshot once per cycle, consistent with the persisted
+    # state, so the dashboard's /api/status shows real paper data (not the demo
+    # fallback). An additional write — the ordering/invariants above are untouched.
+    app.publish_status()

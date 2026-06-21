@@ -25,6 +25,7 @@ from magic_agent.live import run_live
 from magic_agent.runtime_state import RuntimeState
 from magic_agent.spot_models import AuthorizedSetup
 from magic_agent.state_journal import IntegrityError, StateJournal
+from magic_agent.status_store import read_status_snapshot
 
 
 class _ControllableFrameSource:
@@ -84,6 +85,7 @@ _RUN_CYCLE_MEMBERS = (
     "compliance",
     "execution_journal",
     "state_journal",
+    "publish_status",
 )
 
 
@@ -510,3 +512,49 @@ def test_build_app_fails_closed_on_corrupt_positions_store(tmp_path):
 
     with pytest.raises(IntegrityError):
         build_app(mode="paper", root_dir=tmp_path)
+
+
+def test_paper_cycle_publishes_live_status_snapshot(tmp_path):
+    """Each paper cycle must publish a LIVE status snapshot the dashboard reads.
+
+    The ``magic-agent serve`` ``/api/status`` reader loads ``<base>/status.json`` and
+    only falls back to a hardcoded ``mode="demo"`` placeholder when that file is
+    absent. The spot loop never wrote it, so the dashboard was permanently in demo
+    mode. After a paper ``run_cycle`` over a temp base, ``status.json`` must EXIST and
+    reflect the live runtime — NOT the demo fallback:
+
+    * ``mode`` is the run mode (``"paper"``), never ``"demo"``.
+    * ``equity`` matches the live ``RuntimeState`` equity (a float, JSON-safe).
+    * ``positions`` count matches the open position book.
+    * ``halted`` is a real bool derived from the live halt state.
+    """
+    now = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    setup = AuthorizedSetup.example()
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        starting_equity=Decimal("10000"),
+    )
+
+    run_live(app, clock=_clock(now), max_iters=1)
+
+    # The cycle booked exactly one position (the live book the snapshot must reflect).
+    assert len(app.position_manager.book) == 1
+
+    # The snapshot file exists under the App's base dir and is readable.
+    status_path = tmp_path / ".magic_agent" / "status.json"
+    assert status_path.exists(), "run_cycle did not publish a status snapshot"
+    snapshot = read_status_snapshot(status_path)
+    assert snapshot is not None
+
+    # It reflects the LIVE runtime — never the demo fallback.
+    assert snapshot["mode"] == "paper", f"expected live paper mode, got {snapshot!r}"
+    assert snapshot["mode"] != "demo"
+    assert snapshot["equity"] == float(app.state.equity_usd)
+    assert snapshot["available"] == float(app.state.cash_usd)
+    assert len(snapshot["positions"]) == len(app.position_manager.book)
+    assert isinstance(snapshot["halted"], bool)
+    assert snapshot["halted"] is False  # a fresh, fully-funded session is not halted.
