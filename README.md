@@ -102,6 +102,43 @@ the commit-pinned git source so the deployable install stays self-contained.
 
 Both processes must run with the same working directory.
 
+## Track 1 spot runtime
+
+### Execution modes
+
+Paper is the **default and the only validated surface** — a bare `magic-agent run`
+wires `PaperExecutionAdapter` (simulated fills, no funds, full decision logging).
+Live execution (`--executor twak`) is an explicit opt-in and requires completing every
+gate in the [activation runbook](docs/track1-spot-runbook.md) first.
+
+```bash
+uv run magic-agent run                   # paper (default — safe, no funds)
+uv run magic-agent run --executor twak  # live — all activation gates must be met first
+```
+
+### Authority model
+
+- **TWAK is the sole signer** for all swaps and x402 payments. No other signing path
+  exists in the live runtime.
+- **The scanner owns setup authority.** `scanner_gateway.scan` is the only source of
+  `AuthorizedSetup`; CMC is rank/veto only and never creates or overrides a setup.
+- **RiskPolicy is mandatory.** Missing policy raises `RuntimeError` before any entry is
+  sized — the only exception is a protective exit on a reconciled position.
+- **No optimistic booking.** A position is booked only after receipt confirmation and
+  balance-delta reconciliation. An unconfirmed or mismatched receipt blocks new
+  exposure.
+
+### First live order
+
+The first live order uses `canary_risk_fraction = 0.0025` (0.25 %) and one concurrent
+position. These limits must not be raised until causal replay evidence justifies it.
+
+### Activation runbook
+
+See [`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md) for the full
+operator checklist, all activation gates, operational status display fields, known
+limitations, and emergency procedures.
+
 ## Tests
 
 ```bash
