@@ -18,8 +18,9 @@ dependencies = [
 magic-agent = "magic_agent.cli:main"
 
 [project.optional-dependencies]
-# ERC-8004 on-chain identity is OPTIONAL. Without it, the agent runs normally
-# and the dashboard shows "unregistered" (see cli._resolve_agent_id).
+# ERC-8004 on-chain identity is OPTIONAL and independent of the trading path.
+# Without it, the dashboard shows "unregistered" (see cli._resolve_agent_id);
+# identity does not gate the runtime (which is itself not yet launchable).
 # Install with: `uv sync --extra identity` or `pip install 'magic-agent[identity]'`.
 # Distribution/import package is `bnbagent` (https://github.com/bnb-chain/bnbagent-sdk).
 # Pinned to an IMMUTABLE commit (not a floating branch/HEAD) so fresh installs are
