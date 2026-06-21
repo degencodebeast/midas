@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from magic_agent.app import App, FixtureCmcClient, build_app
@@ -24,6 +25,43 @@ from magic_agent.live import run_live
 from magic_agent.runtime_state import RuntimeState
 from magic_agent.spot_models import AuthorizedSetup
 from magic_agent.state_journal import IntegrityError, StateJournal
+
+
+class _ControllableFrameSource:
+    """A :class:`FrameSource` whose H1 low/high is settable per cycle.
+
+    Drives the paper-exit ``observe`` deterministically: the test mutates ``low``
+    and ``high`` between cycles to place the position in range or onto its stop /
+    campaign-DOL. ``closed_frames`` returns a single closed H1 bar carrying the
+    current low/high (and a matching close), in the feed schema the runtime reads.
+    """
+
+    def __init__(self, *, low: Decimal, high: Decimal) -> None:
+        self.low = low
+        self.high = high
+
+    def _frame(self) -> pd.DataFrame:
+        low = float(self.low)
+        high = float(self.high)
+        close = (low + high) / 2
+        index = pd.DatetimeIndex(
+            [pd.Timestamp("2026-06-21T11:00:00Z")], name="open_time"
+        )
+        return pd.DataFrame(
+            {
+                "open": [close],
+                "high": [high],
+                "low": [low],
+                "close": [close],
+                "volume": [1.0],
+                "close_time": [pd.Timestamp("2026-06-21T12:00:00Z")],
+            },
+            index=index,
+        )
+
+    def closed_frames(self, candidate) -> dict[str, pd.DataFrame]:
+        frame = self._frame()
+        return {"1w": frame, "12h": frame, "1h": frame}
 
 # Every attribute/method ``runner.run_cycle`` reads off ``app``. The App must
 # expose EXACTLY these (the fake ``app`` in test_spot_runtime is the contract).
@@ -226,6 +264,108 @@ def test_build_app_fails_closed_on_corrupt_state_file(tmp_path):
 
     with pytest.raises(IntegrityError):
         build_app(mode="paper", root_dir=tmp_path)
+
+
+def test_paper_round_trip_stop_hit_closes_position_and_frees_slot(tmp_path):
+    """Paper is a real ROUND-TRIP: a booked position whose stop is hit CLOSES.
+
+    On the inert no-op wiring a booked position is never evaluated for exit, so it
+    never closes -> ``open_strategy_positions`` stays 1 forever -> the concurrency
+    cap blocks every future entry (RED). This drives the full lifecycle through the
+    injected frame source:
+
+    * Cycle 1: price in range -> book exactly one position.
+    * Cycle 2: H1 low hits the structural stop (90) -> the position CLOSES (book
+      empties, ``open_strategy_positions == 0``), freeing the concurrency slot.
+    * Cycle 3: price back in range, still authorized -> a NEW position books
+      (slot freed).
+    """
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    now3 = now2 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()  # entry 100, stop 90, campaign_dol 120
+    # Realistic scanner: a stop-breached structure is no longer a valid setup, so the
+    # scanner authorizes ONLY while the H1 low holds above the structural stop. This
+    # keeps the close and the next entry in SEPARATE cycles (a stopped-out structure
+    # does not immediately re-authorize at the price that just broke it).
+    frame_source = _ControllableFrameSource(low=Decimal("95"), high=Decimal("105"))
+
+    def scan(candidate):
+        return setup if frame_source.low > setup.structural_stop else None
+
+    scanner_gateway = SimpleNamespace(scan=scan)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        frame_source=frame_source,
+    )
+
+    # Cycle 1: price in range -> book exactly one position.
+    run_live(app, clock=_clock(now1), max_iters=1)
+    assert len(app.position_manager.book) == 1
+    assert app.state.risk_state().open_strategy_positions == 1
+
+    # Cycle 2: H1 low hits the stop (90) -> the position CLOSES and the slot frees.
+    # The scanner no longer authorizes (broken structure), so the book ends EMPTY.
+    frame_source.low = Decimal("89")
+    run_live(app, clock=_clock(now2), max_iters=1)
+    assert app.position_manager.book == []
+    assert len(app.position_manager.positions()) == 0
+    assert app.state.risk_state().open_strategy_positions == 0
+    # The close was real: the exited position is gone, not assumed-held.
+    assert all(p.intent_id != "intent:setup-1" for p in app.position_manager.book)
+
+    # Cycle 3: price back in range, authorized again -> a NEW position books (the
+    # freed slot is reusable — proving the concurrency cap no longer blocks entry).
+    frame_source.low = Decimal("95")
+    run_live(app, clock=_clock(now3), max_iters=1)
+    assert len(app.position_manager.book) == 1
+
+
+def test_paper_round_trip_close_is_durable_across_restart(tmp_path):
+    """After a stop-hit CLOSE, a restart must NOT resurrect the closed position.
+
+    The close drops the position from the book, and ``run_cycle`` persists the
+    (now empty) book to ``positions.json``. A ``build_app`` restart over the same
+    base must restore an EMPTY book — never the closed position.
+    """
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()
+    frame_source = _ControllableFrameSource(low=Decimal("95"), high=Decimal("105"))
+
+    def scan(candidate):
+        return setup if frame_source.low > setup.structural_stop else None
+
+    scanner_gateway = SimpleNamespace(scan=scan)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        frame_source=frame_source,
+    )
+
+    # Cycle 1: book; cycle 2: stop hit -> close (persisted by run_cycle).
+    run_live(app, clock=_clock(now1), max_iters=1)
+    assert len(app.position_manager.book) == 1
+    frame_source.low = Decimal("89")
+    run_live(app, clock=_clock(now2), max_iters=1)
+    assert app.position_manager.book == []
+
+    # RESTART over the same base: the closed position must NOT be resurrected. The
+    # restart frame holds the breached price so no fresh entry confounds the assert.
+    app2 = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+        frame_source=frame_source,
+    )
+    assert app2.position_manager.book == []
+    assert app2.state.risk_state().open_strategy_positions == 0
 
 
 def test_build_app_fresh_base_still_new_sessions(tmp_path):

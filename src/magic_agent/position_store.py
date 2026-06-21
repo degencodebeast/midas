@@ -61,6 +61,15 @@ class PositionStore:
                 "intent_id": position.intent_id,
                 "quantity": str(position.quantity),
                 "stressed_loss_per_unit": str(position.stressed_loss_per_unit),
+                # Exit context (symbol/identity_key/stop/campaign_dol) so a restored
+                # position stays exit-manageable. Optional strings/decimals are
+                # encoded as exact strings (or null) with no binary-float drift.
+                "symbol": position.symbol,
+                "identity_key": position.identity_key,
+                "stop": None if position.stop is None else str(position.stop),
+                "campaign_dol": (
+                    None if position.campaign_dol is None else str(position.campaign_dol)
+                ),
             }
             for position in positions
         ]
@@ -96,4 +105,21 @@ class PositionStore:
             ) from exc
         except (ArithmeticError, TypeError) as exc:
             raise ValueError(f"persisted position has an undecodable decimal: {exc}") from exc
-        return ReconciledPosition(intent_id, quantity, stressed_loss_per_unit)
+        # Optional exit-context fields (records written before this field set will
+        # simply lack them); decode the optional decimals exactly.
+        try:
+            stop = record.get("stop")
+            campaign_dol = record.get("campaign_dol")
+            stop_dec = None if stop is None else Decimal(stop)
+            campaign_dol_dec = None if campaign_dol is None else Decimal(campaign_dol)
+        except (ArithmeticError, TypeError) as exc:
+            raise ValueError(f"persisted position has an undecodable decimal: {exc}") from exc
+        return ReconciledPosition(
+            intent_id,
+            quantity,
+            stressed_loss_per_unit,
+            symbol=record.get("symbol"),
+            identity_key=record.get("identity_key"),
+            stop=stop_dec,
+            campaign_dol=campaign_dol_dec,
+        )

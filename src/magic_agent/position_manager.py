@@ -32,11 +32,24 @@ class ReconciledPosition:
             exits and size risk reductions. Defaults to ``0`` when the reconcile
             caller does not carry setup geometry (it is not load-bearing for the
             concurrency count, which keys only on the open-position *count*).
+        symbol: Market-data symbol of the open position. Carried so the paper-exit
+            ``observe`` port can fetch the position's current price frame. ``None``
+            when the reconcile caller does not carry setup geometry.
+        identity_key: Identity key of the open position's instrument, used to resolve
+            its price frame in the paper-exit ``observe`` port. ``None`` when absent.
+        stop: Structural stop price. A bar low at/below it triggers a protective stop
+            exit (the highest-precedence exit). ``None`` when absent.
+        campaign_dol: Campaign drawing-of-liquidity target. A bar high at/above it
+            triggers a campaign-DOL exit. ``None`` when absent.
     """
 
     intent_id: str
     quantity: Decimal
     stressed_loss_per_unit: Decimal = Decimal("0")
+    symbol: str | None = None
+    identity_key: str | None = None
+    stop: Decimal | None = None
+    campaign_dol: Decimal | None = None
 
 
 class PositionManager:
@@ -64,17 +77,17 @@ class PositionManager:
             reduction = self.risk_policy.reduction_for(position, self.risk_state())
             observation = self.observe(position, now, reduction)
             if observation is None:
-                # No protective-exit observation this cycle (the paper observe port
-                # is an inert no-op — paper has no live price frame to evaluate an
-                # exit against). The position is retained for a later cycle; it is
-                # never dropped or assumed-closed.
+                # No protective-exit observation this cycle (the observe port could
+                # not assemble one — e.g. a position with no exit geometry, or no
+                # current price frame for its symbol). The position is retained for a
+                # later cycle; it is never dropped or assumed-closed.
                 continue
             inputs = self.evaluator.evaluate(observation)
             decision = self.pipeline.decide(inputs)
             if decision.action != "risk_exit":
                 continue
             quote = self.sell_probe(position, decision.exit_quantity)
-            if not quote.approved:
+            if quote is None or not quote.approved:
                 self.alert("protective_exit_unquotable", position)
                 continue
             self.execute(position, decision, quote)
@@ -96,8 +109,16 @@ class PositionManager:
         setup = getattr(intent, "setup", None)
         if setup is not None:
             stressed_loss_per_unit = setup.entry - setup.structural_stop
+            symbol = setup.symbol
+            identity_key = setup.identity_key
+            stop = setup.structural_stop
+            campaign_dol = setup.campaign_dol
         else:
             stressed_loss_per_unit = Decimal("0")
-        position = ReconciledPosition(intent.intent_id, position_qty, stressed_loss_per_unit)
+            symbol = identity_key = stop = campaign_dol = None
+        position = ReconciledPosition(
+            intent.intent_id, position_qty, stressed_loss_per_unit,
+            symbol=symbol, identity_key=identity_key, stop=stop, campaign_dol=campaign_dol,
+        )
         self.book.append(position)
         return position

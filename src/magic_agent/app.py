@@ -54,6 +54,7 @@ from magic_agent.frames import FixtureFrameSource, GateioFrameSource
 from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
 from magic_agent.paper_adapter import PaperExecutionAdapter
+from magic_agent.paper_exits import PaperExitPorts
 from magic_agent.position_manager import PositionManager
 from magic_agent.position_store import PositionStore
 from magic_agent.quotes import ExecutabilityAdapter, PaperQuoteProvider
@@ -212,6 +213,7 @@ def build_app(
     cmc_client: Any = None,
     scanner_gateway: Any = None,
     gold_candidate_symbol: str | None = None,
+    frame_source: Any = None,
 ) -> App:
     """Assemble the runtime :class:`App`.
 
@@ -234,6 +236,9 @@ def build_app(
             self-contained offline paper run can actually book (the committed dataset's
             only gold identity has no frame fixture). The committed data file is NOT
             mutated.
+        frame_source: Override the market-data :class:`FrameSource` used by both the
+            scanner gateway and the paper-exit ``observe`` port (injectable for tests
+            that drive exit prices). Defaults to the offline fixture source.
 
     Returns:
         The assembled :class:`App`.
@@ -298,10 +303,13 @@ def build_app(
     # skipped. Live wiring restores the full pinned set.
     watchlist = WatchlistManager(WatchlistState(_fixtured_symbols(fixture_dir, registry), None))
 
-    # Market-data frame source: offline fixtures by default, read-only gate.io if
-    # live data is explicitly requested (still no funds, no keys).
-    if use_live_frames:
-        frame_source: Any = GateioFrameSource(registry=registry)
+    # Market-data frame source: an explicit injection (tests drive paper-exit
+    # prices through it), else offline fixtures by default, else read-only gate.io
+    # if live data is explicitly requested (still no funds, no keys).
+    if frame_source is not None:
+        pass  # caller-injected source (used by both the scanner gateway and paper-exit observe)
+    elif use_live_frames:
+        frame_source = GateioFrameSource(registry=registry)
     else:
         frame_source = FixtureFrameSource(registry=registry, fixture_dir=fixture_dir)
 
@@ -316,27 +324,39 @@ def build_app(
 
     # Position manager: paper books reconciled positions. The positions feed is
     # the manager's own reconcile book (the SINGLE source for both exits and the
-    # concurrency count), so a booked position is fed back to the next cycle. Paper
-    # does not simulate protective exits (no live price frame), so the observe /
-    # sell-probe / execute ports are inert no-ops — but ordering and risk-reduction
-    # still see the real booked positions. Booking flows ONLY through
+    # concurrency count), so a booked position is fed back to the next cycle. The
+    # observe / sell_probe / execute ports are bound below to the price-driven paper
+    # exit ports so a booked position is a real ROUND-TRIP (stop / campaign-DOL hit
+    # closes it and frees the slot). Booking flows ONLY through
     # open_from_reconciliation (the no-optimistic-booking invariant).
     position_manager = PositionManager(
         positions=lambda: [],  # rebound to the live book below (avoids the construction cycle).
-        observe=lambda position, observed_at, reduction: None,
+        observe=lambda position, observed_at, reduction: None,  # rebound below.
         evaluator=LifecycleEvaluator(),
         pipeline=DecisionPipeline(),
         risk_policy=risk_policy,
         risk_state=state.risk_state,
-        sell_probe=lambda position, quantity: None,
-        execute=lambda *args: None,
+        sell_probe=lambda position, quantity: None,  # rebound below.
+        execute=lambda *args: None,  # rebound below.
     )
     # Restore any open positions persisted before a restart INTO the book, BEFORE
     # wiring open_positions below — so the restored open count is visible to the next
     # cycle's concurrency cap (blocks re-entry) and the restored positions are a
-    # complete exit source (they carry quantity + stressed_loss_per_unit). A corrupt
-    # store raises IntegrityError here (fail closed — no empty-book re-entry).
+    # complete exit source (they carry quantity + stressed_loss_per_unit + the exit
+    # geometry: symbol/stop/campaign_dol). A corrupt store raises IntegrityError here
+    # (fail closed — no empty-book re-entry).
     position_manager.book = position_store.load()
+
+    # Bind the price-driven paper exit ports to the (now-restored) book and the frame
+    # source. ``observe`` reads the position's current price bar to detect a stop /
+    # campaign-DOL hit; ``execute`` removes the closed position from THIS book, so
+    # positions() and the concurrency count drop and the close is persisted by
+    # run_cycle's end-of-cycle save. PAPER-MODE mechanism only — live exits are
+    # driven by real fills / chain truth (a deliberate follow-on).
+    exit_ports = PaperExitPorts(frame_source=frame_source, book=position_manager.book)
+    position_manager.observe = exit_ports.observe
+    position_manager.sell_probe = exit_ports.sell_probe
+    position_manager.execute = exit_ports.execute
 
     # Feed the open booked positions back as the exit source, and surface the open
     # count to the risk snapshot's concurrency cap. Both read the SAME book, so a
