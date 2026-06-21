@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     # source. Default MUST match `serve --log` so both processes share one file.
     run.add_argument("--log", default=".magic_agent/decisions.jsonl",
                      help="Path to the JSONL decision log (default: .magic_agent/decisions.jsonl)")
+    # Bound the loop for smoke runs / tests; None (default) runs until the clock
+    # raises StopIteration (a real live clock blocks instead).
+    run.add_argument("--max-iters", type=int, default=None,
+                     help="Bound the number of cycles (default: unbounded)")
     run.set_defaults(func=_cmd_run)
 
     sv = sub.add_parser("serve", help="Serve the read-only mission-control dashboard API")
@@ -50,19 +54,33 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _cmd_run(args: argparse.Namespace) -> None:  # pragma: no cover - live loop wiring
-    # Wiring only; exercised manually / on testnet, not in unit tests. The shared
-    # spot loop logic itself lives in (unit-tested) runner.run_cycle / live.run_live.
-    #
-    # Paper is the default execution port (simulated fills, no funds). `--executor twak`
-    # is the only live opt-in: it routes entries through the TWAK/ExecutionCoordinator
-    # path. Either way EVERY decision input flows through the shared
-    # LifecycleEvaluator -> DecisionPipeline inside run_cycle — the CLI never hand-builds
-    # DecisionInputs and never reaches the scanner / RiskPolicy / coordinator directly.
-    raise NotImplementedError(
-        "spot runtime app assembly is wired on testnet; the shared loop "
-        "(runner.run_cycle / live.run_live) is the unit-tested surface"
-    )
+def _cmd_run(args: argparse.Namespace) -> None:
+    # Assemble the runtime App and drive the shared poll loop. Paper is the default
+    # (simulated fills, no funds, no network). `--executor twak` is the only live
+    # opt-in and routes through the TWAK/ExecutionCoordinator path. EITHER way every
+    # decision input flows through the shared LifecycleEvaluator -> DecisionPipeline
+    # inside run_cycle — the CLI never hand-builds DecisionInputs and never reaches
+    # the scanner / RiskPolicy / coordinator directly.
+    from datetime import datetime, timedelta, timezone
+
+    from magic_agent.app import build_app
+    from magic_agent.live import run_live
+
+    mode = "paper" if args.executor == "paper" else "twak"
+    root_dir = getattr(args, "root_dir", None)
+    app = build_app(mode=mode, root_dir=root_dir)
+
+    # A monotonic clock: each tick advances 5 minutes from the process start. For a
+    # bounded smoke run (`--max-iters`) this terminates deterministically; unbounded
+    # it ticks forever (a real live deployment swaps in a bar-close-aligned clock).
+    start = datetime.now(tz=timezone.utc)
+    counter = {"n": 0}
+
+    def clock() -> datetime:
+        counter["n"] += 1
+        return start + timedelta(minutes=5 * counter["n"])
+
+    run_live(app, clock=clock, max_iters=getattr(args, "max_iters", None))
 
 
 def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,

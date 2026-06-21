@@ -56,7 +56,13 @@ class PaperExecutionAdapter:
         Returns:
             ``"RECONCILED"`` — the simulated terminal state.
         """
-        position_qty = Decimal(str(quote["quantity"]))
+        # Realized fill quantity. The production paper quote provider
+        # (`quotes.PaperQuoteProvider`) emits this under `output_qty`; a bare
+        # `quantity` key is also accepted for simpler quote stubs.
+        if "output_qty" in quote:
+            position_qty = Decimal(str(quote["output_qty"]))
+        else:
+            position_qty = Decimal(str(quote["quantity"]))
         self.positions.open_from_reconciliation(intent, position_qty)
         self.records.append(PaperExecutionRecord(
             intent=intent, quote=quote, evidence={"simulated": True},
