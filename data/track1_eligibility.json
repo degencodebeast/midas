@@ -1,0 +1,598 @@
+[
+  {
+    "eligibility_id": "track1-001",
+    "competition_symbol": "ETH"
+  },
+  {
+    "eligibility_id": "track1-002",
+    "competition_symbol": "USDT"
+  },
+  {
+    "eligibility_id": "track1-003",
+    "competition_symbol": "USDC"
+  },
+  {
+    "eligibility_id": "track1-004",
+    "competition_symbol": "XRP"
+  },
+  {
+    "eligibility_id": "track1-005",
+    "competition_symbol": "TRX"
+  },
+  {
+    "eligibility_id": "track1-006",
+    "competition_symbol": "DOGE"
+  },
+  {
+    "eligibility_id": "track1-007",
+    "competition_symbol": "ZEC"
+  },
+  {
+    "eligibility_id": "track1-008",
+    "competition_symbol": "ADA"
+  },
+  {
+    "eligibility_id": "track1-009",
+    "competition_symbol": "LINK"
+  },
+  {
+    "eligibility_id": "track1-010",
+    "competition_symbol": "BCH"
+  },
+  {
+    "eligibility_id": "track1-011",
+    "competition_symbol": "DAI"
+  },
+  {
+    "eligibility_id": "track1-012",
+    "competition_symbol": "TON"
+  },
+  {
+    "eligibility_id": "track1-013",
+    "competition_symbol": "USD1"
+  },
+  {
+    "eligibility_id": "track1-014",
+    "competition_symbol": "USDe"
+  },
+  {
+    "eligibility_id": "track1-015",
+    "competition_symbol": "M"
+  },
+  {
+    "eligibility_id": "track1-016",
+    "competition_symbol": "LTC"
+  },
+  {
+    "eligibility_id": "track1-017",
+    "competition_symbol": "AVAX"
+  },
+  {
+    "eligibility_id": "track1-018",
+    "competition_symbol": "SHIB"
+  },
+  {
+    "eligibility_id": "track1-019",
+    "competition_symbol": "XAUt"
+  },
+  {
+    "eligibility_id": "track1-020",
+    "competition_symbol": "WLFI"
+  },
+  {
+    "eligibility_id": "track1-021",
+    "competition_symbol": "H"
+  },
+  {
+    "eligibility_id": "track1-022",
+    "competition_symbol": "DOT"
+  },
+  {
+    "eligibility_id": "track1-023",
+    "competition_symbol": "UNI"
+  },
+  {
+    "eligibility_id": "track1-024",
+    "competition_symbol": "ASTER"
+  },
+  {
+    "eligibility_id": "track1-025",
+    "competition_symbol": "DEXE"
+  },
+  {
+    "eligibility_id": "track1-026",
+    "competition_symbol": "USDD"
+  },
+  {
+    "eligibility_id": "track1-027",
+    "competition_symbol": "ETC"
+  },
+  {
+    "eligibility_id": "track1-028",
+    "competition_symbol": "AAVE"
+  },
+  {
+    "eligibility_id": "track1-029",
+    "competition_symbol": "ATOM"
+  },
+  {
+    "eligibility_id": "track1-030",
+    "competition_symbol": "U"
+  },
+  {
+    "eligibility_id": "track1-031",
+    "competition_symbol": "STABLE"
+  },
+  {
+    "eligibility_id": "track1-032",
+    "competition_symbol": "FIL"
+  },
+  {
+    "eligibility_id": "track1-033",
+    "competition_symbol": "INJ"
+  },
+  {
+    "eligibility_id": "track1-034",
+    "competition_symbol": "币安人生"
+  },
+  {
+    "eligibility_id": "track1-035",
+    "competition_symbol": "NIGHT"
+  },
+  {
+    "eligibility_id": "track1-036",
+    "competition_symbol": "FET"
+  },
+  {
+    "eligibility_id": "track1-037",
+    "competition_symbol": "TUSD"
+  },
+  {
+    "eligibility_id": "track1-038",
+    "competition_symbol": "BONK"
+  },
+  {
+    "eligibility_id": "track1-039",
+    "competition_symbol": "PENGU"
+  },
+  {
+    "eligibility_id": "track1-040",
+    "competition_symbol": "CAKE"
+  },
+  {
+    "eligibility_id": "track1-041",
+    "competition_symbol": "SIREN"
+  },
+  {
+    "eligibility_id": "track1-042",
+    "competition_symbol": "LUNC"
+  },
+  {
+    "eligibility_id": "track1-043",
+    "competition_symbol": "ZRO"
+  },
+  {
+    "eligibility_id": "track1-044",
+    "competition_symbol": "KITE"
+  },
+  {
+    "eligibility_id": "track1-045",
+    "competition_symbol": "FDUSD"
+  },
+  {
+    "eligibility_id": "track1-046",
+    "competition_symbol": "BEAT"
+  },
+  {
+    "eligibility_id": "track1-047",
+    "competition_symbol": "PIEVERSE"
+  },
+  {
+    "eligibility_id": "track1-048",
+    "competition_symbol": "BTT"
+  },
+  {
+    "eligibility_id": "track1-049",
+    "competition_symbol": "NFT"
+  },
+  {
+    "eligibility_id": "track1-050",
+    "competition_symbol": "EDGE"
+  },
+  {
+    "eligibility_id": "track1-051",
+    "competition_symbol": "FLOKI"
+  },
+  {
+    "eligibility_id": "track1-052",
+    "competition_symbol": "LDO"
+  },
+  {
+    "eligibility_id": "track1-053",
+    "competition_symbol": "B"
+  },
+  {
+    "eligibility_id": "track1-054",
+    "competition_symbol": "FF"
+  },
+  {
+    "eligibility_id": "track1-055",
+    "competition_symbol": "PENDLE"
+  },
+  {
+    "eligibility_id": "track1-056",
+    "competition_symbol": "NEX"
+  },
+  {
+    "eligibility_id": "track1-057",
+    "competition_symbol": "STG"
+  },
+  {
+    "eligibility_id": "track1-058",
+    "competition_symbol": "AXS"
+  },
+  {
+    "eligibility_id": "track1-059",
+    "competition_symbol": "TWT"
+  },
+  {
+    "eligibility_id": "track1-060",
+    "competition_symbol": "HOME"
+  },
+  {
+    "eligibility_id": "track1-061",
+    "competition_symbol": "RAY"
+  },
+  {
+    "eligibility_id": "track1-062",
+    "competition_symbol": "COMP"
+  },
+  {
+    "eligibility_id": "track1-063",
+    "competition_symbol": "GWEI"
+  },
+  {
+    "eligibility_id": "track1-064",
+    "competition_symbol": "XCN"
+  },
+  {
+    "eligibility_id": "track1-065",
+    "competition_symbol": "GENIUS"
+  },
+  {
+    "eligibility_id": "track1-066",
+    "competition_symbol": "XPL"
+  },
+  {
+    "eligibility_id": "track1-067",
+    "competition_symbol": "BAT"
+  },
+  {
+    "eligibility_id": "track1-068",
+    "competition_symbol": "SKYAI"
+  },
+  {
+    "eligibility_id": "track1-069",
+    "competition_symbol": "APE"
+  },
+  {
+    "eligibility_id": "track1-070",
+    "competition_symbol": "IP"
+  },
+  {
+    "eligibility_id": "track1-071",
+    "competition_symbol": "SFP"
+  },
+  {
+    "eligibility_id": "track1-072",
+    "competition_symbol": "TAG"
+  },
+  {
+    "eligibility_id": "track1-073",
+    "competition_symbol": "NXPC"
+  },
+  {
+    "eligibility_id": "track1-074",
+    "competition_symbol": "AB"
+  },
+  {
+    "eligibility_id": "track1-075",
+    "competition_symbol": "SAHARA"
+  },
+  {
+    "eligibility_id": "track1-076",
+    "competition_symbol": "1INCH"
+  },
+  {
+    "eligibility_id": "track1-077",
+    "competition_symbol": "CHEEMS"
+  },
+  {
+    "eligibility_id": "track1-078",
+    "competition_symbol": "BANANAS31"
+  },
+  {
+    "eligibility_id": "track1-079",
+    "competition_symbol": "RIVER"
+  },
+  {
+    "eligibility_id": "track1-080",
+    "competition_symbol": "MYX"
+  },
+  {
+    "eligibility_id": "track1-081",
+    "competition_symbol": "RAVE"
+  },
+  {
+    "eligibility_id": "track1-082",
+    "competition_symbol": "SNX"
+  },
+  {
+    "eligibility_id": "track1-083",
+    "competition_symbol": "FORM"
+  },
+  {
+    "eligibility_id": "track1-084",
+    "competition_symbol": "LAB"
+  },
+  {
+    "eligibility_id": "track1-085",
+    "competition_symbol": "HTX"
+  },
+  {
+    "eligibility_id": "track1-086",
+    "competition_symbol": "USDf"
+  },
+  {
+    "eligibility_id": "track1-087",
+    "competition_symbol": "CTM"
+  },
+  {
+    "eligibility_id": "track1-088",
+    "competition_symbol": "BDX"
+  },
+  {
+    "eligibility_id": "track1-089",
+    "competition_symbol": "SLX"
+  },
+  {
+    "eligibility_id": "track1-090",
+    "competition_symbol": "UB"
+  },
+  {
+    "eligibility_id": "track1-091",
+    "competition_symbol": "DUCKY"
+  },
+  {
+    "eligibility_id": "track1-092",
+    "competition_symbol": "FRAX"
+  },
+  {
+    "eligibility_id": "track1-093",
+    "competition_symbol": "BILL"
+  },
+  {
+    "eligibility_id": "track1-094",
+    "competition_symbol": "WFI"
+  },
+  {
+    "eligibility_id": "track1-095",
+    "competition_symbol": "KOGE"
+  },
+  {
+    "eligibility_id": "track1-096",
+    "competition_symbol": "ALE"
+  },
+  {
+    "eligibility_id": "track1-097",
+    "competition_symbol": "FRXUSD"
+  },
+  {
+    "eligibility_id": "track1-098",
+    "competition_symbol": "USDF"
+  },
+  {
+    "eligibility_id": "track1-099",
+    "competition_symbol": "GOMINING"
+  },
+  {
+    "eligibility_id": "track1-100",
+    "competition_symbol": "VCNT"
+  },
+  {
+    "eligibility_id": "track1-101",
+    "competition_symbol": "GUA"
+  },
+  {
+    "eligibility_id": "track1-102",
+    "competition_symbol": "DUSD"
+  },
+  {
+    "eligibility_id": "track1-103",
+    "competition_symbol": "SMILEK"
+  },
+  {
+    "eligibility_id": "track1-104",
+    "competition_symbol": "0G"
+  },
+  {
+    "eligibility_id": "track1-105",
+    "competition_symbol": "BEAM"
+  },
+  {
+    "eligibility_id": "track1-106",
+    "competition_symbol": "MY"
+  },
+  {
+    "eligibility_id": "track1-107",
+    "competition_symbol": "SLX"
+  },
+  {
+    "eligibility_id": "track1-108",
+    "competition_symbol": "SOON"
+  },
+  {
+    "eligibility_id": "track1-109",
+    "competition_symbol": "REAL"
+  },
+  {
+    "eligibility_id": "track1-110",
+    "competition_symbol": "Q"
+  },
+  {
+    "eligibility_id": "track1-111",
+    "competition_symbol": "AIOZ"
+  },
+  {
+    "eligibility_id": "track1-112",
+    "competition_symbol": "ZIG"
+  },
+  {
+    "eligibility_id": "track1-113",
+    "competition_symbol": "YFI"
+  },
+  {
+    "eligibility_id": "track1-114",
+    "competition_symbol": "TAC"
+  },
+  {
+    "eligibility_id": "track1-115",
+    "competition_symbol": "lisUSD"
+  },
+  {
+    "eligibility_id": "track1-116",
+    "competition_symbol": "CYS"
+  },
+  {
+    "eligibility_id": "track1-117",
+    "competition_symbol": "ZAMA"
+  },
+  {
+    "eligibility_id": "track1-118",
+    "competition_symbol": "TRIA"
+  },
+  {
+    "eligibility_id": "track1-119",
+    "competition_symbol": "HUMA"
+  },
+  {
+    "eligibility_id": "track1-120",
+    "competition_symbol": "PLUME"
+  },
+  {
+    "eligibility_id": "track1-121",
+    "competition_symbol": "ZIL"
+  },
+  {
+    "eligibility_id": "track1-122",
+    "competition_symbol": "XPR"
+  },
+  {
+    "eligibility_id": "track1-123",
+    "competition_symbol": "ZETA"
+  },
+  {
+    "eligibility_id": "track1-124",
+    "competition_symbol": "BabyDoge"
+  },
+  {
+    "eligibility_id": "track1-125",
+    "competition_symbol": "NILA"
+  },
+  {
+    "eligibility_id": "track1-126",
+    "competition_symbol": "ROSE"
+  },
+  {
+    "eligibility_id": "track1-127",
+    "competition_symbol": "VELO"
+  },
+  {
+    "eligibility_id": "track1-128",
+    "competition_symbol": "UAI"
+  },
+  {
+    "eligibility_id": "track1-129",
+    "competition_symbol": "BRETT"
+  },
+  {
+    "eligibility_id": "track1-130",
+    "competition_symbol": "OPEN"
+  },
+  {
+    "eligibility_id": "track1-131",
+    "competition_symbol": "BSB"
+  },
+  {
+    "eligibility_id": "track1-132",
+    "competition_symbol": "TOSHI"
+  },
+  {
+    "eligibility_id": "track1-133",
+    "competition_symbol": "BAS"
+  },
+  {
+    "eligibility_id": "track1-134",
+    "competition_symbol": "ACH"
+  },
+  {
+    "eligibility_id": "track1-135",
+    "competition_symbol": "AXL"
+  },
+  {
+    "eligibility_id": "track1-136",
+    "competition_symbol": "LUR"
+  },
+  {
+    "eligibility_id": "track1-137",
+    "competition_symbol": "ELF"
+  },
+  {
+    "eligibility_id": "track1-138",
+    "competition_symbol": "KAVA"
+  },
+  {
+    "eligibility_id": "track1-139",
+    "competition_symbol": "APR"
+  },
+  {
+    "eligibility_id": "track1-140",
+    "competition_symbol": "IRYS"
+  },
+  {
+    "eligibility_id": "track1-141",
+    "competition_symbol": "EURI"
+  },
+  {
+    "eligibility_id": "track1-142",
+    "competition_symbol": "XUSD"
+  },
+  {
+    "eligibility_id": "track1-143",
+    "competition_symbol": "BARD"
+  },
+  {
+    "eligibility_id": "track1-144",
+    "competition_symbol": "DUSK"
+  },
+  {
+    "eligibility_id": "track1-145",
+    "competition_symbol": "SUSHI"
+  },
+  {
+    "eligibility_id": "track1-146",
+    "competition_symbol": "PEAQ"
+  },
+  {
+    "eligibility_id": "track1-147",
+    "competition_symbol": "COAI"
+  },
+  {
+    "eligibility_id": "track1-148",
+    "competition_symbol": "BDCA"
+  },
+  {
+    "eligibility_id": "track1-149",
+    "competition_symbol": "XAUM"
+  }
+]
