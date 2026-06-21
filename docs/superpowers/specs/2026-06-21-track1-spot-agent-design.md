@@ -1,10 +1,10 @@
 ---
 title: Track 1 Spot Trading Agent Design
-version: 1.0
+version: 1.1
 date_created: 2026-06-21
 last_updated: 2026-06-21
 owner: degencodebeast
-tags: [architecture, trading, spot, bnb-chain, twak, coinmarketcap, risk]
+tags: [architecture, trading, spot, bnb-chain, twak, x402, coinmarketcap, risk]
 ---
 
 # Introduction
@@ -14,6 +14,10 @@ spot-long trading agent for BNB Hack Track 1. MIDAS uses CoinMarketCap (CMC) to
 rank and veto candidates, the deterministic `magic-scanner` to authorize ICT/SMC
 setups, a mandatory deterministic risk policy to size exposure, and Trust Wallet
 Agent Kit (TWAK) as the sole live execution and signing layer.
+
+The design also targets the Best Use of Trust Wallet Agent Kit special prize by
+making self-custody, autonomous execution, bounded native x402 payments, and
+on-chain proof substantive parts of the operating loop.
 
 This specification supersedes the active-path interpretation in
 `2026-06-15-bnb-track1-trading-agent-design.md`. The earlier Aster/perpetuals
@@ -32,12 +36,15 @@ for M15 confirmation, while enforcing conservative portfolio and execution caps.
 
 - Contract-bound identity for the approved spot universe.
 - CMC candidate ranking and deterministic vetoes.
+- Clamp-only CMC macro-regime context and forward snapshot capture.
 - Weekly/H12 campaign context, existing H4 refinement where available, and H1
   QML authorization from the scanner.
 - Direct QML as the active hackathon execution path.
 - Canonical structural stop consumption from the scanner.
 - Fixed-fractional sizing with execution and portfolio caps.
 - PancakeSwap-compatible spot swaps executed and signed through TWAK.
+- Native x402 payment through TWAK for an allowlisted trade-loop data or tool
+  request, subject to a separate deterministic spending budget.
 - Receipt-aware, restart-safe execution and reconciliation.
 - Position monitoring, structural exits, risk halts, audit records, and status.
 - Daily competition qualification tracking.
@@ -63,6 +70,15 @@ failure mode rather than duplicate or bypass scanner QML authorization.
 - **Canonical structural stop**: Stop beyond the reclaim-confirmed H12 sweep
   candle extreme, otherwise beyond the confirmed protective H12 pivot, including
   the scanner's configured structural buffer.
+- **Campaign DOL**: A concrete directional move-completion target and source
+  selected by the scanner from authoritative external liquidity. It is distinct
+  from checklist qualification.
+- **Checklist DOL**: A scoring binary requiring direction, entry, coherent
+  sweep-derived stop, on-side target, and minimum reward-to-risk. It may be false
+  while a concrete campaign DOL still exists.
+- **Macro clamp**: A deterministic CMC-derived multiplier or veto that may only
+  reduce deployment or stop new exposure; it cannot create a setup or increase
+  size above the scanner/RiskPolicy result.
 - **Gold identity**: Case-preserved competition symbol bound to one CMC ID, BSC
   chain ID, verified BEP-20 contract, decimals, and observed on-chain symbol.
 - **Executability probe**: A fresh, trade-size quote and round-trip route check.
@@ -75,6 +91,8 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   adverse exit slippage, fees, gas, and route impact.
 - **Fresh CMC snapshot**: A timestamped selector snapshot within its configured
   time-to-live (TTL).
+- **x402 payment**: A bounded, allowlisted machine payment initiated through
+  TWAK for a verified data, inference, or tool request used in the trade loop.
 
 ## 3. Requirements, Constraints & Guidelines
 
@@ -113,6 +131,9 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   strength, and narrative context.
 - **REQ-021**: CMC may veto deterministic falling-knife, stale-data, or explicit
   market-risk conditions defined in versioned configuration.
+- **REQ-021A**: CMC macro-regime context may apply a versioned deployment clamp
+  or explicit extreme-risk veto. It may only preserve or reduce deterministic
+  exposure and shall never import a provider-suggested allocation directly.
 - **REQ-022**: CMC shall not create a setup, direction, QML, POI, stop, target, or
   trade authorization.
 - **REQ-023**: `location_candidate` shall remain research/location metadata and
@@ -126,10 +147,11 @@ failure mode rather than duplicate or bypass scanner QML authorization.
 
 - **REQ-030**: The scanner remains the sole source of strategy setup authority.
 - **REQ-031**: A strategy trade requires a governing H12/D1 campaign POI, a valid
-  H1 QML inside that POI, an A- or B-family grade, and a canonical structural stop.
+  H1 QML inside that POI, an A- or B-family grade, a canonical structural stop,
+  and a concrete campaign DOL target.
 - **REQ-032**: Missing reclaim-confirmed H12 sweep or RR-qualified checklist DOL
   may lower grade but shall not automatically invalidate an otherwise authorized
-  B-grade Direct QML.
+  B-grade Direct QML when a concrete campaign DOL still exists.
 - **REQ-033**: In the active hackathon profile, Direct QML shall be selected
   immediately when REQ-031 passes.
 - **REQ-034**: Direct QML shall outrank already-observed M15 SCOB or MSS evidence.
@@ -140,15 +162,25 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   confirmation interval before selecting Direct QML.
 - **REQ-038**: Scanner supersession and lifecycle outputs shall be consumed as-is.
   MIDAS shall not revive a scanner-rejected or superseded QML.
+- **REQ-039**: The scanner's public aggressive result shall expose the selected
+  entry, canonical `stop_level`, `stop_source`, `stop_anchor`, `stop_anchor_bar`,
+  `campaign_dol_level`, `campaign_dol_source`, and checklist-DOL binary from one
+  internally consistent as-of evaluation.
+- **REQ-039A**: If campaign DOL is unresolved, MIDAS shall retain the QML as
+  monitorable scanner state but shall not create a live strategy intent. Fixed
+  reward multiples shall not be fabricated as replacement targets.
 - **CON-002**: The scanner change is limited to an explicit aggressive API mode
-  that can derive Direct QML without reading M15. Supersession changes are banned
-  from this implementation slice, as are new H4/D1 detector implementations.
+  that can derive Direct QML without reading M15 and export the existing canonical
+  stop and campaign-DOL results listed in REQ-039. Detector semantics,
+  supersession logic, and new H4/D1 detector implementations are banned from this
+  implementation slice.
 
 ### 3.5 RiskPolicy
 
 - **REQ-040**: RiskPolicy shall be mandatory and non-optional on every funds path.
-  It shall be action-aware: entry and compliance actions may increase exposure;
-  `risk_exit` actions may only reduce an already-reconciled position.
+  It shall be action-aware: entry and compliance actions may increase exposure,
+  x402 actions may spend only their service budget, and `risk_exit` actions may
+  only reduce an already-reconciled position.
 - **REQ-041**: Empty or missing custom policy configuration shall activate an
   immutable fail-safe policy that denies exposure-increasing actions and permits
   only reconciled, exposure-reducing exits. No caller may skip policy evaluation.
@@ -198,6 +230,8 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   size is below venue minimum or fee viability, the trade shall be skipped.
 - **REQ-049**: The AI advisor may wait or reduce size only. It may not authorize,
   increase size, change direction, entry, stop, target, identity, or policy.
+- **REQ-049A**: A macro clamp and AI clamp shall compose by taking the most
+  restrictive result. Neither may increase the pre-clamp RiskPolicy quantity.
 - **CON-003**: No leverage, averaging down, DCA, stopless entry, or user override
   may exceed deterministic caps.
 
@@ -261,6 +295,9 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   and execution journal shall survive restart.
 - **REQ-084**: State writes shall be atomic and integrity-protected. Missing or
   invalid integrity evidence shall halt new entries.
+- **CON-004A**: The H12-pivot fallback may occasionally produce a macro-distant
+  stop. MIDAS shall accept the resulting small size or skipped trade; it shall not
+  invent an H1-local stop tier during this implementation slice.
 
 ### 3.9 Competition compliance
 
@@ -286,17 +323,54 @@ failure mode rather than duplicate or bypass scanner QML authorization.
   gas reserve, drawdown cap, or execution guard. This restriction does not block
   a policy-approved exposure-reducing `risk_exit`.
 
-### 3.10 Offline replay and claims
+### 3.10 Offline replay, forward validation, and claims
 
-- **REQ-100**: Causal replay shall apply point-in-time universe membership, CMC
-  ranking/veto data, scanner decisions, RiskPolicy, portfolio constraints,
-  simulated competition costs, and exact qualification rules.
+- **REQ-100**: Historical causal replay shall use only point-in-time data that is
+  available or reproducible as of each decision, including scanner frames,
+  reconstructable momentum, RiskPolicy, portfolio constraints, and versioned
+  cost assumptions.
 - **REQ-101**: Replay work shall run in parallel and shall not block the minimum
   safe live path.
 - **REQ-102**: Live defaults shall remain conservative until replay evidence
   supports a versioned change.
+- **REQ-103**: Historical replay shall execute the same decision pipeline as live:
+  scanner authorization, aggressive Direct QML selection, canonical stop,
+  campaign DOL, RiskPolicy, portfolio gates, and lifecycle exits. A live macro
+  clamp shall run only when its point-in-time input exists; otherwise replay uses
+  an explicit neutral clamp and records the exclusion. Only research adapters and
+  declared unavailable-input variants may differ.
+- **REQ-104**: Agent Hub skill outputs, narratives, sector snapshots, and macro
+  recommendations that cannot be reconstructed point-in-time shall be excluded
+  from historical claims and validated through forward shadow snapshots.
+- **REQ-105**: MIDAS shall persist every live CMC input, raw/normalized values,
+  timestamp, TTL, configuration version, and resulting rank/veto/clamp so future
+  combined replay is possible.
+- **REQ-106**: The detailed replay methodology is governed by
+  `2026-06-21-causal-replay-design.md`.
 - **CON-005**: No profitability or top-rank claim may be made from current manual
   selector observations or scanner charts alone.
+
+### 3.11 TWAK and x402 prize objective
+
+- **REQ-110**: TWAK shall remain the sole live signing and transaction-processing
+  authority for spot swaps and native x402 payments.
+- **REQ-111**: At least one verified x402-paid data, inference, or tool request
+  shall contribute real information to the candidate-selection or risk-context
+  loop before the submission claims native x402 integration.
+- **REQ-112**: x402 destinations, service identifiers, chain, asset, and maximum
+  price per request shall be allowlisted. Unknown or changed payment terms shall
+  fail closed.
+- **REQ-113**: x402 spending shall have per-request and daily USD caps, sufficient
+  gas checks, idempotency, durable intent/payment/result records, and operator
+  alerts for unknown outcomes. It shall pass the mandatory action-aware funds
+  policy before TWAK invocation.
+- **REQ-114**: x402 failure may make new CMC-dependent entries unavailable, but it
+  shall never block position monitoring, reconciliation, or a protective exit.
+- **REQ-115**: The demo and audit record shall link scanner decision, RiskPolicy,
+  x402 request where applicable, TWAK-signed swap hash, receipt, and reconciled
+  balance change without exposing private keys or secrets.
+- **CON-006**: A README mention, mocked payment, or unrelated x402 call shall not
+  be represented as trade-loop integration.
 
 ## 4. Interfaces & Data Contracts
 
@@ -332,6 +406,8 @@ class CandidateSnapshot(TypedDict):
     volume_change: float | None
     volatility_risk: str
     sector_context: str | None
+    macro_regime: str | None
+    macro_clamp: float
     vetoed: bool
     veto_reasons: list[str]
 ```
@@ -352,8 +428,10 @@ class AuthorizedSetup(TypedDict):
     entry: float
     structural_stop: float
     stop_source: str
-    target: float | None
-    target_source: str | None
+    stop_anchor: float
+    stop_anchor_bar: int
+    campaign_dol: float
+    campaign_dol_source: str
     sweep_confirmed: bool
     checklist_dol: bool
     scanner_commit: str
@@ -376,7 +454,31 @@ class RiskDecision(TypedDict):
     applied_caps: dict[str, float]
 ```
 
-### 4.5 ExecutionRecord
+### 4.5 X402PaymentRecord
+
+```python
+class X402PaymentRecord(TypedDict):
+    payment_id: str
+    purpose: str
+    provider: str
+    service_id: str
+    chain_id: int
+    asset_contract: str
+    quoted_amount_usd: float
+    approved_amount_usd: float
+    max_request_usd: float
+    max_daily_usd: float
+    daily_spend_before_usd: float
+    request_hash: str
+    idempotency_key: str
+    tx_hash: str | None
+    state: str
+    result_hash: str | None
+    created_at: str
+    updated_at: str
+```
+
+### 4.6 ExecutionRecord
 
 ```python
 class ExecutionRecord(TypedDict):
@@ -398,10 +500,11 @@ class ExecutionRecord(TypedDict):
     updated_at: str
 ```
 
-### 4.6 Component boundaries
+### 4.7 Component boundaries
 
 ```text
-IdentityRegistry -> CmcSelector -> ScannerGateway -> RiskPolicy
+IdentityRegistry -> X402BudgetedDataClient -> CmcSelector -> ScannerGateway
+-> MacroClamp -> RiskPolicy
 -> ExecutabilityProbe -> ExecutionJournal -> TwakSpotExecutor
 -> ReceiptReconciler -> PositionManager
 
@@ -424,6 +527,14 @@ the same execution coordinator used by strategy intents.
 - **AC-005**: Given MIDAS receives a scanner result, when it builds the setup, then
   the stop equals the scanner's canonical structural stop and is not derived from
   `qml_key_level` plus a fixed percentage.
+- **AC-005A**: Given MIDAS receives an aggressive scanner result, then the entry,
+  stop level/source/anchor/bar, campaign DOL level/source, and checklist-DOL value
+  are present and come from the same as-of evaluation.
+- **AC-005B**: Given checklist DOL is false but campaign DOL is concrete, when the
+  remaining A/B setup requirements pass, then the lower-grade setup may proceed
+  using that campaign target without fabricating checklist confluence.
+- **AC-005C**: Given campaign DOL is unresolved, when MIDAS evaluates the QML,
+  then it remains monitorable but creates no live strategy intent or fixed-R target.
 - **AC-006**: Given policy configuration is missing, when any funds action is
   attempted, then exposure-increasing execution is denied before TWAK invocation;
   only a reconciled exposure-reducing exit may proceed under fail-safe policy.
@@ -450,6 +561,15 @@ the same execution coordinator used by strategy intents.
   anchor, execution journal, compliance ledger, and positions are preserved.
 - **AC-017**: Given a drawdown or stale-CMC entry halt is active, when a managed
   position reaches its stop, then a policy-approved `risk_exit` remains executable.
+- **AC-018**: Given CMC proposes a larger allocation than RiskPolicy, when the
+  macro clamp is applied, then final size does not exceed the deterministic base.
+- **AC-019**: Given an allowlisted x402 request exceeds its request or daily cap,
+  when payment is evaluated, then no payment occurs and the denial is audited.
+- **AC-020**: Given x402 is unavailable while a position is open, when its stop is
+  reached, then monitoring and the TWAK protective exit remain operational.
+- **AC-021**: Given an x402-paid CMC request and a resulting live trade, when the
+  audit trail is rendered, then the request, decision, swap receipt, and balance
+  reconciliation are linked without exposing signing secrets.
 
 ## 6. Test Automation Strategy
 
@@ -459,11 +579,14 @@ the same execution coordinator used by strategy intents.
 - **Unit tests**:
   - identity ambiguity and case preservation;
   - selector ranking, vetoes, TTL, and stale behavior;
+  - macro clamp composition and no-size-increase invariant;
   - aggressive Direct QML with existing or absent M15;
-  - canonical stop mapping;
+  - canonical stop and campaign-DOL mapping;
+  - checklist-DOL false with campaign target versus unresolved campaign DOL;
   - fixed-fractional sizing and every cap;
   - drawdown, daily stress, correlation, and halt behavior;
-  - strict TWAK output parsing and state transitions.
+  - strict TWAK output parsing and state transitions;
+  - x402 allowlist, budgets, idempotency, persistence, and unknown outcomes.
 - **Integration tests**:
   - scanner commit and setup contract;
   - quote-to-intent-to-receipt-to-balance reconciliation;
@@ -478,6 +601,8 @@ the same execution coordinator used by strategy intents.
   scanner suite must remain green after the narrow aggressive API addition.
 - **Offline research tests**: point-in-time replay, next-executable-price fills,
   costs, no look-ahead, portfolio overlap, daily qualification, and drawdown.
+- **Forward research tests**: immutable CMC snapshot capture, schema/config version,
+  normalized-output reproducibility, and future replay ingestion.
 
 ## 7. Rationale & Context
 
@@ -490,6 +615,15 @@ The scanner contains a known supersession concern. Reopening that lifecycle work
 under the deadline creates greater risk than accepting missed setups. The safe
 failure is therefore omission, never agent-side revival.
 
+Checklist DOL and campaign DOL are intentionally separate. Missing sweep or RR
+qualification may lower a setup to B-grade while leaving a real campaign target.
+When the campaign target itself is unresolved, preserving the QML for monitoring
+does not justify opening a targetless position.
+
+The H12-pivot fallback is deliberately conservative. A distant pivot reduces
+fixed-fractional size or causes a skip; this is preferable to introducing an
+unvalidated tighter stop under the hackathon deadline.
+
 Track 1 requires at least one trade per day and seven across the week, but the
 provided rules do not define all counting semantics. A compliance lane is modeled
 so the obligation is visible, while automatic fallback remains disabled until its
@@ -499,8 +633,9 @@ behavior is separately verified and approved.
 
 ### External Systems
 
-- **EXT-001**: CMC Agent Hub/API - candidate data, context, and optional x402 calls.
-- **EXT-002**: TWAK - sole local signing and spot swap execution layer.
+- **EXT-001**: CMC Agent Hub/API - candidate data, context, forward snapshots,
+  and an x402-paid request used in the trade loop.
+- **EXT-002**: TWAK - sole local signing, spot swap, and native x402 payment layer.
 - **EXT-003**: BNB Smart Chain RPC - token metadata, receipts, confirmations,
   balances, nonce, and reconciliation.
 - **EXT-004**: PancakeSwap-compatible liquidity - routes surfaced through TWAK.
@@ -519,7 +654,8 @@ behavior is separately verified and approved.
   profile; existing H4/D1 refinement may be consumed when the pinned scanner
   already provides it.
 - **DAT-004**: M15 data is optional advisory evidence in aggressive mode.
-- **DAT-005**: Point-in-time CMC selector observations for replay.
+- **DAT-005**: Reconstructable historical momentum inputs for causal replay.
+- **DAT-006**: Forward-captured raw and normalized CMC selector/macro snapshots.
 
 ### Compliance Dependencies
 
@@ -556,7 +692,23 @@ MIDAS: no setup
 Outcome: missed trade accepted; no agent-side QML reconstruction
 ```
 
-### 9.4 Unknown broadcast
+### 9.4 Checklist DOL missing but campaign target present
+
+```text
+Scanner: valid B-grade QML; checklist_dol=false; campaign_dol=prior-week high
+Decision: lower-grade Direct QML may proceed using the prior-week-high target
+Outcome: no sweep or RR-qualified checklist evidence is fabricated
+```
+
+### 9.5 Campaign DOL unresolved
+
+```text
+Scanner: structurally valid QML; campaign_dol_level=None
+Decision: preserve monitorable QML state; do not create a live intent
+Outcome: no fixed-2R replacement and no targetless position
+```
+
+### 9.6 Unknown broadcast
 
 ```text
 TWAK process: timeout after wallet nonce changed
@@ -565,12 +717,28 @@ State: BROADCAST_UNKNOWN
 Outcome: global entry halt; inspect nonce, balances, and recent receipts; no retry
 ```
 
-### 9.5 No qualifying trade near day boundary
+### 9.7 No qualifying trade near day boundary
 
 ```text
 Strategy trades today: 0
 Compliance fallback: disabled pending verified counting semantics
 Outcome: urgent qualification-risk alert; no disguised location trade
+```
+
+### 9.8 Macro-distant pivot fallback
+
+```text
+Scanner: valid QML; no coherent sweep; latest confirmed H12 pivot is far away
+RiskPolicy: safe quantity falls below fee-viable or venue-minimum size
+Outcome: skip; do not tighten the stop to an H1 pivot
+```
+
+### 9.9 x402 request failure during an open position
+
+```text
+x402 CMC request: unavailable
+New CMC-dependent entries: halted
+Existing position: monitored normally; stop exit remains available through TWAK
 ```
 
 ## 10. Validation Criteria
@@ -580,8 +748,12 @@ Outcome: urgent qualification-risk alert; no disguised location trade
 - No position is created before receipt and balance reconciliation.
 - Direct QML works without M15 and remains selected when M15 evidence exists.
 - Canonical scanner stops reach sizing and position management unchanged.
+- Campaign DOL reaches live and replay exits unchanged; unresolved campaign DOL
+  cannot become a fixed-R or targetless live trade.
 - Scanner supersession logic remains untouched.
 - CMC cannot originate a setup or increase risk.
+- CMC snapshots required for future combined replay are captured prospectively.
+- x402 is bounded, auditable, used in the trade loop, and cannot block risk exits.
 - Compliance cannot masquerade as strategy or bypass safety controls.
 - Historical perp documents are clearly superseded before deployment.
 - The active scanner dependency is pinned to the reviewed aggressive-mode commit.
@@ -594,3 +766,4 @@ Outcome: urgent qualification-risk alert; no disguised location trade
 - Workspace `spec/spec-process-agent-trading-mode-of-operation.md`
 - `docs/superpowers/specs/2026-06-15-bnb-track1-trading-agent-design.md`
 - `docs/superpowers/specs/2026-06-15-venue-spike-findings.md`
+- `docs/superpowers/specs/2026-06-21-causal-replay-design.md`
