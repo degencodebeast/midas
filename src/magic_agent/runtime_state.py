@@ -19,7 +19,8 @@ round-trips exactly with no binary-float drift.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from magic_agent.risk_policy import PortfolioRiskState
@@ -62,6 +63,15 @@ class RuntimeState:
     reconciled_position: bool = False
     canary_mode: bool = True
     blocks_new_exposure: bool = False
+    # Live source for the open-position count, wired by ``build_app`` to the
+    # position manager's reconcile book so a booked position is visible to the
+    # next cycle's concurrency cap and a close/exit decrements it. Excluded from
+    # init, repr, equality, and persistence: it is a runtime wiring hook, not
+    # session state. When ``None`` the stored ``open_strategy_positions`` int is
+    # used (the persisted/restored value and the existing-test default).
+    open_positions: Callable[[], int] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     @classmethod
     def new_session(cls, starting_equity: Decimal) -> "RuntimeState":
@@ -83,7 +93,17 @@ class RuntimeState:
         )
 
     def risk_state(self) -> PortfolioRiskState:
-        """Project the tracked fields into the frozen risk snapshot."""
+        """Project the tracked fields into the frozen risk snapshot.
+
+        ``open_strategy_positions`` reflects the live open-position count from the
+        wired :attr:`open_positions` provider when present (the reconcile book), so
+        a position booked this cycle is visible to the next cycle's concurrency cap;
+        otherwise it falls back to the stored integer.
+        """
+        if self.open_positions is not None:
+            open_strategy_positions = self.open_positions()
+        else:
+            open_strategy_positions = self.open_strategy_positions
         return PortfolioRiskState(
             equity_usd=self.equity_usd,
             cash_usd=self.cash_usd,
@@ -91,7 +111,7 @@ class RuntimeState:
             daily_anchor_usd=self.daily_anchor_usd,
             open_stressed_loss_usd=self.open_stressed_loss_usd,
             correlation_bucket_stressed_loss_usd=self.correlation_bucket_stressed_loss_usd,
-            open_strategy_positions=self.open_strategy_positions,
+            open_strategy_positions=open_strategy_positions,
             consecutive_stops=self.consecutive_stops,
             equity_fresh=self.equity_fresh,
             reconciled_position=self.reconciled_position,

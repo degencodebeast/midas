@@ -290,12 +290,15 @@ def build_app(
     quote_provider = PaperQuoteProvider(now=_iso(state))
     executability = ExecutabilityAdapter(quote_provider)
 
-    # Position manager: paper books reconciled positions; it does not simulate
-    # protective exits (paper has no live price frame), so the positions feed is
-    # empty and the exit ports are inert no-ops. Booking still flows ONLY through
+    # Position manager: paper books reconciled positions. The positions feed is
+    # the manager's own reconcile book (the SINGLE source for both exits and the
+    # concurrency count), so a booked position is fed back to the next cycle. Paper
+    # does not simulate protective exits (no live price frame), so the observe /
+    # sell-probe / execute ports are inert no-ops — but ordering and risk-reduction
+    # still see the real booked positions. Booking flows ONLY through
     # open_from_reconciliation (the no-optimistic-booking invariant).
     position_manager = PositionManager(
-        positions=lambda: [],
+        positions=lambda: [],  # rebound to the live book below (avoids the construction cycle).
         observe=lambda position, observed_at, reduction: None,
         evaluator=LifecycleEvaluator(),
         pipeline=DecisionPipeline(),
@@ -304,6 +307,12 @@ def build_app(
         sell_probe=lambda position, quantity: None,
         execute=lambda *args: None,
     )
+    # Feed the open booked positions back as the exit source, and surface the open
+    # count to the risk snapshot's concurrency cap. Both read the SAME book, so a
+    # position booked this cycle denies a second entry next cycle, and a close/exit
+    # that drops it from the book decrements the count.
+    position_manager.positions = lambda: list(position_manager.book)
+    state.open_positions = lambda: len(position_manager.book)
 
     # The paper execution port: it is BOTH the execution coordinator (.submit) and
     # the execution_journal compliance reads (.confirmed_records). Recovery reads

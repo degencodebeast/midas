@@ -28,10 +28,15 @@ class ReconciledPosition:
     Attributes:
         intent_id: The intent that produced the reconciled buy.
         quantity: Realized token quantity from the reconciled balance delta.
+        stressed_loss_per_unit: Per-unit stressed loss used to order protective
+            exits and size risk reductions. Defaults to ``0`` when the reconcile
+            caller does not carry setup geometry (it is not load-bearing for the
+            concurrency count, which keys only on the open-position *count*).
     """
 
     intent_id: str
     quantity: Decimal
+    stressed_loss_per_unit: Decimal = Decimal("0")
 
 
 class PositionManager:
@@ -57,7 +62,14 @@ class PositionManager:
         )
         for position in ordered:
             reduction = self.risk_policy.reduction_for(position, self.risk_state())
-            inputs = self.evaluator.evaluate(self.observe(position, now, reduction))
+            observation = self.observe(position, now, reduction)
+            if observation is None:
+                # No protective-exit observation this cycle (the paper observe port
+                # is an inert no-op — paper has no live price frame to evaluate an
+                # exit against). The position is retained for a later cycle; it is
+                # never dropped or assumed-closed.
+                continue
+            inputs = self.evaluator.evaluate(observation)
             decision = self.pipeline.decide(inputs)
             if decision.action != "risk_exit":
                 continue
@@ -81,6 +93,11 @@ class PositionManager:
         Returns:
             The booked :class:`ReconciledPosition`.
         """
-        position = ReconciledPosition(intent.intent_id, position_qty)
+        setup = getattr(intent, "setup", None)
+        if setup is not None:
+            stressed_loss_per_unit = setup.entry - setup.structural_stop
+        else:
+            stressed_loss_per_unit = Decimal("0")
+        position = ReconciledPosition(intent.intent_id, position_qty, stressed_loss_per_unit)
         self.book.append(position)
         return position

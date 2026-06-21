@@ -94,6 +94,36 @@ def test_paper_cycle_books_only_via_reconcile_path(tmp_path):
     assert app.position_manager.book[0].quantity > 0
 
 
+def test_paper_two_cycles_book_one_position_concurrency_cap_denies_second(tmp_path):
+    # An authorizing scanner + a single gold candidate so each cycle reaches
+    # execution; everything else is the real production wiring. With
+    # max_concurrent_positions == 1, booking ONE position must make the second
+    # cycle deny entry via concurrency_cap — never a second booking.
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+    )
+
+    ticks = iter([now1, now2])
+    run_live(app, clock=lambda: next(ticks), max_iters=2)
+
+    # Exactly ONE position booked across two authorized cycles: the second cycle
+    # is denied by the concurrency cap, not booked again.
+    assert len(app.position_manager.book) == 1
+    confirmed = app.execution_coordinator.confirmed_records()
+    assert len(confirmed) == 1
+    # The open booked position is visible to the exit feed and the risk snapshot,
+    # so the concurrency cap can see it on the next cycle.
+    assert len(app.position_manager.positions()) == 1
+    assert app.state.risk_state().open_strategy_positions == 1
+
+
 def test_cmd_run_paper_completes_without_not_implemented(tmp_path):
     from magic_agent import cli
 
