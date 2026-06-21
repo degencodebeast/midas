@@ -27,6 +27,12 @@ magic-agent = "magic_agent.cli:main"
 # reproducible; bump the sha deliberately when you want a newer SDK.
 identity = ["bnbagent @ git+https://github.com/bnb-chain/bnbagent-sdk@8a65004c4969bb1f16feaa4adf4f422ac870cf10"]
 
+# Live market data via gate.io is OPTIONAL: GateioFrameSource imports `ccxt`
+# LAZILY, so the module and the offline FixtureFrameSource path need no ccxt.
+# Only the live (`GateioFrameSource`) path requires it. Read-only OHLCV only —
+# no keys, no funds, no orders. Install with: `uv sync --extra live`.
+live = ["ccxt>=4.0"]
+
 [build-system]
 requires = ["uv_build>=0.11.6,<0.12.0"]
 build-backend = "uv_build"
