@@ -2820,11 +2820,14 @@ execution set; competition registration; state backup; paper cycle; and explicit
 activation. The first live order uses the 0.25% canary risk default and one concurrent position.
 Operational status must display grade fraction, counter-bias multiplier, 3% throttle, 5% entry halt,
 8% emergency review, 1.5% daily halt, three-stop halt, correlation/open-risk utilization, stale-equity
-state, and the confirmed 30% hard-DQ boundary.
+state, scanner raw/effective grade plus promotion provenance, and the confirmed 30% hard-DQ boundary.
 
 - [ ] **Step 4: Run Opus review**
 
-Apply `general-review-protocol` to all runtime commits. Any path that books before reconciliation, bypasses RiskPolicy, signs outside TWAK, fabricates stop/DOL, or blocks a protective exit is release-blocking.
+Apply `general-review-protocol` to all runtime commits. Any path that books before reconciliation,
+bypasses RiskPolicy, signs outside TWAK, fabricates stop/DOL, blocks a protective exit, reads a
+tradable grade from `ChecklistResultV2.rating` instead of scanner authorization, or reconstructs
+counter-bias promotion inside MIDAS is release-blocking.
 
 - [ ] **Step 5: Commit documentation fixes**
 
@@ -2837,5 +2840,7 @@ git commit -m "docs: add Track 1 spot activation runbook"
 
 - **Coverage:** eligibility/identity REQ-010-015 -> Tasks 3/4A; CMC REQ-020-024 -> Tasks 4/4A/12; scanner REQ-030-039A -> Tasks 1/2/5; risk REQ-040-049A -> Tasks 6/7/14; executability REQ-050-056 -> Tasks 9/14; execution REQ-060-070 -> Tasks 8-10; positions REQ-080-084 -> Tasks 7/11/14; compliance REQ-090-095 -> Task 14; x402 REQ-110-115 -> Task 12; registration and migration -> Tasks 13-15.
 - **Locked authority:** TWAK signs swaps and x402. `bnbagent-sdk` is ERC-8004 identity only. CMC never creates setup authority.
+- **Grade authority:** scanner authorization owns the effective grade. MIDAS stores raw grade and
+  promotion provenance for audit but RiskPolicy sizes only from `AuthorizedSetup.grade`.
 - **Accepted limits:** scanner supersession semantics remain untouched and are consumed as scanner-owned provenance; macro-distant H12 pivots reduce size or skip; compliance execution remains disabled; live defaults remain conservative until causal replay evidence exists.
 - **Dependency:** Task 1 cannot substitute a scanner SHA until the scanner-contract plan is implemented and reviewed. All other tasks may be developed against the local editable scanner but the operational gate remains closed.

@@ -1539,7 +1539,11 @@ Expected: PASS.
 
 - [ ] **Step 4: Run Opus review**
 
-Apply `general-review-protocol`. Release blockers are future leakage, decision-bar fills, fixed-R fallback, missing unresolved positions, independent per-trade funding, double-counted costs, present CMC joined backward, duplicated watchlist/risk logic, automatic live promotion of a research profile, or a `live_parity` label when runtime contracts differ.
+Apply `general-review-protocol`. Release blockers are future leakage, decision-bar fills, fixed-R
+fallback, missing unresolved positions, independent per-trade funding, double-counted costs, present
+CMC joined backward, duplicated watchlist/risk/grade-mapping logic, substitution of raw scanner grade
+for effective grade, automatic live promotion of a research profile, or a `live_parity` label when
+runtime contracts differ.
 
 - [ ] **Step 5: Commit documentation fixes**
 
