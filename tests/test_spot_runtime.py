@@ -78,6 +78,7 @@ def _app(*, authorized: bool, policy_present: bool = True, execution_eligible: b
         compliance=SimpleNamespace(observe=lambda records, observed_at: alerts.append(SimpleNamespace(code="daily_qualification_at_risk")) if not records else None),
         execution_journal=SimpleNamespace(confirmed_records=lambda: executions),
         state_journal=SimpleNamespace(save=lambda payload: None),
+        position_store=SimpleNamespace(save=lambda positions: None),
     )
     return app, executions, alerts, now
 

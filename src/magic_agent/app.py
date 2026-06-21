@@ -55,6 +55,7 @@ from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
 from magic_agent.paper_adapter import PaperExecutionAdapter
 from magic_agent.position_manager import PositionManager
+from magic_agent.position_store import PositionStore
 from magic_agent.quotes import ExecutabilityAdapter, PaperQuoteProvider
 from magic_agent.risk_policy import RiskConfig, RiskPolicy
 from magic_agent import recovery
@@ -174,6 +175,12 @@ class App:
     compliance: ComplianceLedger
     execution_journal: Any
     state_journal: StateJournal
+    # Durable store for the open paper-position book, persisted by run_cycle so a
+    # booked position survives a restart (the concurrency cap blocks re-entry and
+    # process_exits can still manage it). PAPER-MODE mechanism only — in live the
+    # open book is the chain's truth (rebuilt via reconcile/balances), a separate
+    # follow-on.
+    position_store: PositionStore
     # The real chain journal recovery scans (.records). Bound here so
     # reconcile_unfinished closes over it; never read by run_cycle directly.
     _chain_journal: ExecutionJournal = None  # type: ignore[assignment]
@@ -268,6 +275,13 @@ def build_app(
     exclusion_journal = ExclusionJournal(base / "exclusions.jsonl")
     decision_journal = DecisionJournal(base / "decisions.jsonl")
     state_journal = StateJournal(base / "state.json")
+    # Durable open-position store (paper-mode mechanism — see PositionStore). Loaded
+    # below, then the restored book is placed into the PositionManager BEFORE the
+    # open_positions count is wired, so a position booked before a restart still
+    # blocks re-entry and is exit-manageable. A corrupt store raises IntegrityError
+    # and is allowed to propagate (fail closed — never start with an empty book that
+    # would re-enter).
+    position_store = PositionStore(base / "positions.json")
     if state_journal.path.exists():
         state = RuntimeState.from_dict(state_journal.load())
     else:
@@ -317,6 +331,13 @@ def build_app(
         sell_probe=lambda position, quantity: None,
         execute=lambda *args: None,
     )
+    # Restore any open positions persisted before a restart INTO the book, BEFORE
+    # wiring open_positions below — so the restored open count is visible to the next
+    # cycle's concurrency cap (blocks re-entry) and the restored positions are a
+    # complete exit source (they carry quantity + stressed_loss_per_unit). A corrupt
+    # store raises IntegrityError here (fail closed — no empty-book re-entry).
+    position_manager.book = position_store.load()
+
     # Feed the open booked positions back as the exit source, and surface the open
     # count to the risk snapshot's concurrency cap. Both read the SAME book, so a
     # position booked this cycle denies a second entry next cycle, and a close/exit
@@ -346,6 +367,7 @@ def build_app(
         compliance=ComplianceLedger(),
         execution_journal=paper_adapter,
         state_journal=state_journal,
+        position_store=position_store,
         _chain_journal=chain_journal,
     )
 

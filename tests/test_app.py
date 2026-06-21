@@ -236,3 +236,81 @@ def test_build_app_fresh_base_still_new_sessions(tmp_path):
     assert app.state.canary_mode is True
     assert app.state.blocks_new_exposure is False
     assert app.state.open_positions is not None
+
+
+def test_paper_booked_position_survives_restart_and_blocks_re_entry(tmp_path):
+    """A booked paper position is DURABLE across a restart (no cross-restart re-entry).
+
+    The same-process concurrency cap is already enforced (#65-H) and runtime state
+    restores on restart (#65-I), but the open POSITION itself was not persisted: the
+    PositionManager.book started EMPTY on restart, so the next authorized cycle
+    re-entered the same setup (cross-restart double-entry). This is the missing
+    combined test: book exactly one position, let run_cycle persist, REBUILD over the
+    same base (restart), and assert the restored book carries the position, the risk
+    snapshot reflects the open count, the position is exit-manageable, and a second
+    cycle does NOT book again (denied by the concurrency cap).
+    """
+    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    now2 = now1 + timedelta(minutes=5)
+    setup = AuthorizedSetup.example()
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+
+    # Cycle 1: book exactly one position, run_cycle persists at the end.
+    app1 = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+    )
+    run_live(app1, clock=_clock(now1), max_iters=1)
+    assert len(app1.position_manager.book) == 1
+    booked_intent_id = app1.position_manager.book[0].intent_id
+    booked_quantity = app1.position_manager.book[0].quantity
+
+    # RESTART: rebuild over the SAME base. The durable position store must restore
+    # the open position into the book.
+    app2 = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+    )
+
+    # The restored book is NON-EMPTY and carries the same position.
+    assert len(app2.position_manager.book) == 1
+    restored = app2.position_manager.book[0]
+    assert restored.intent_id == booked_intent_id
+    assert restored.quantity == booked_quantity
+    # A complete exit-source citizen: it carries its quantity + stressed_loss_per_unit
+    # (entry 100 - structural_stop 90 == 10) so process_exits can order/manage it.
+    assert restored.stressed_loss_per_unit == Decimal("10")
+    # The exit feed and the risk snapshot both see the restored open position, so the
+    # concurrency cap is live on the next cycle.
+    assert len(app2.position_manager.positions()) == 1
+    assert app2.state.open_positions is not None
+    assert app2.state.risk_state().open_strategy_positions == 1
+
+    # Second cycle after restart: the concurrency cap denies a SECOND booking.
+    run_live(app2, clock=_clock(now2), max_iters=1)
+    assert len(app2.position_manager.book) == 1
+    assert len(app2.execution_coordinator.confirmed_records()) == 0
+
+
+def test_build_app_fails_closed_on_corrupt_positions_store(tmp_path):
+    """A corrupt positions store is an operator event: fail closed, never empty-book.
+
+    Starting with an empty book when a persisted position cannot be cleanly restored
+    would re-enter the same setup. Consistent with #65-I's corrupt-state behavior,
+    build_app must surface the IntegrityError instead of silently dropping positions.
+    """
+    base = tmp_path / ".magic_agent"
+    base.mkdir(parents=True, exist_ok=True)
+    # A wrapper whose sha256 does not match its payload -> IntegrityError on load.
+    (base / "positions.json").write_text(
+        '{"payload": [{"intent_id": "x", "quantity": "1", "stressed_loss_per_unit": "0"}],'
+        ' "sha256": "deadbeef"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(IntegrityError):
+        build_app(mode="paper", root_dir=tmp_path)

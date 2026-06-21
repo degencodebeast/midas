@@ -83,3 +83,8 @@ def run_cycle(app, now) -> None:
         app.watchlist.mark_discovery(now)
     app.compliance.observe(app.execution_journal.confirmed_records(), now)
     app.state_journal.save(app.state.as_dict())
+    # Persist the open position book alongside the runtime state so a booking
+    # survives a restart (the next cycle's concurrency cap blocks re-entry) and an
+    # exit that dropped a position from the book decrements the durable count too.
+    # Paper-mode mechanism only — in live the open book is the chain's truth.
+    app.position_store.save(app.position_manager.book)
