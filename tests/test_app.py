@@ -116,3 +116,23 @@ def test_fixture_cmc_client_is_offline_and_returns_zec(tmp_path):
     assert "ZEC" in by_symbol
     # Positive 7d momentum so a counter-bias/aligned candidate can pass the gate.
     assert Decimal(by_symbol["ZEC"].momentum_7d) > 0
+
+
+def test_build_app_paper_works_from_non_repo_root_cwd(tmp_path, monkeypatch):
+    """build_app must not raise FileNotFoundError when the process cwd is NOT the repo root.
+
+    The default eligibility_path and identity_path were relative strings, so they
+    resolved against cwd and crashed when launched from any directory other than the
+    repo root.  After the fix they resolve via the repo anchor embedded in app.py
+    (Path(__file__).resolve().parents[N] / "data" / ...) and therefore work
+    regardless of cwd.
+    """
+    # Move the process cwd away from the repo root — reproduces the crash.
+    monkeypatch.chdir(tmp_path)
+
+    # Must not raise FileNotFoundError for data/track1_eligibility.json or
+    # data/track1_identities.json.
+    app = build_app(mode="paper", root_dir=tmp_path)
+
+    # Sanity-check: the eligibility ledger loaded (non-empty).
+    assert app.candidate_source is not None

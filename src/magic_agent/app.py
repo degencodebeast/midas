@@ -67,9 +67,12 @@ from magic_agent.watchlist import WatchlistManager, WatchlistState
 # Pinned scanner commit recorded on every authorized setup (replay provenance).
 SCANNER_COMMIT = "5f92552e8fdd688808e2709eefc176ab681b7f4f"
 
-# Default data inputs (committed, offline).
-_DEFAULT_ELIGIBILITY_PATH = "data/track1_eligibility.json"
-_DEFAULT_IDENTITY_PATH = "data/track1_identities.json"
+# Repo root anchor (same technique as _DEFAULT_FIXTURE_DIR below).
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
+# Default data inputs (committed, offline) — resolved absolutely so build_app
+# works regardless of the process cwd (callers may still pass an explicit path).
+_DEFAULT_ELIGIBILITY_PATH = _DATA_DIR / "track1_eligibility.json"
+_DEFAULT_IDENTITY_PATH = _DATA_DIR / "track1_identities.json"
 # Committed frame fixtures for offline paper runs (ZEC at minimum).
 _DEFAULT_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "frames"
 
