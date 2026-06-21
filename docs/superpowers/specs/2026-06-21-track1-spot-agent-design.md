@@ -419,7 +419,12 @@ class AuthorizedSetup(TypedDict):
     setup_id: str
     identity_key: str
     direction: Literal["long"]
+    # Scanner-owned effective grade used for live risk.
     grade: str
+    # Frozen engine grade retained for audit and replay parity.
+    raw_grade: str
+    grade_promotion_reason: str | None
+    bias_alignment: Literal["aligned", "counter_bias", "no_bias"]
     governing_poi_timeframe: str
     governing_poi_id: str
     qml_id: str
@@ -437,6 +442,12 @@ class AuthorizedSetup(TypedDict):
     scanner_commit: str
     observed_at: str
 ```
+
+For Track 1, `grade` is always the scanner authorization's effective grade. The only permitted
+raw/effective divergence is the audited counter-bias structural promotion defined by the scanner
+contract (`raw_grade="C"`, `grade="B-"`,
+`grade_promotion_reason="track1_counter_bias_structural"`). MIDAS and replay shall never reconstruct
+this promotion or substitute the frozen engine's raw rating for the effective grade.
 
 ### 4.4 RiskDecision
 

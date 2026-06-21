@@ -6,7 +6,8 @@
 
 **Goal:** Add an explicit Track 1 aggressive scanner contract that accepts the fixed spot-long
 profile constraint, keeps setup authorization inside the scanner, and exports governing-POI,
-Direct-QML, structural-stop, campaign-DOL, checklist-DOL, authorization, and advisory-M15 evidence
+Direct-QML identity/lifecycle provenance, structural-stop, campaign-DOL, checklist-DOL,
+authorization, and advisory-M15 evidence
 without requiring an H12 sweep or M15 data.
 
 **Architecture:** Preserve all legacy/research defaults. Add `execution_mode="track1_aggressive"`
@@ -444,6 +445,8 @@ def test_derive_entry_report_aggressive_when_no_m15():
     assert report.entry == pytest.approx(report.qml_key_level)
     assert report.chained is False
     assert report.mss is False
+    assert report.qml_id is not None
+    assert report.qml_state == "unknown"  # no H12 lifecycle frame was supplied
 
 
 def test_derive_entry_setup_tuple_aggressive_without_m15():
@@ -536,6 +539,39 @@ Then replace the unconditional confirmation-evidence block in `derive_entry_repo
     else:
         first = None
 ```
+
+Preserve the lifecycle result the existing H12 QML selector already computes. Declare the cache
+immediately before `if df_h12 is not None`, populate it inside `_active_qml`, and read it after the
+selected `qml = qmls[-1]`. This is additive provenance only; do not change `_active_qml` acceptance
+semantics:
+
+```python
+    lifecycle_by_qml: dict[tuple[int, float], QmlLifecycleState] = {}
+
+    # Inside the existing _active_qml(qml), immediately after classify_qml_lifecycle(...):
+            lifecycle_by_qml[(qml.reclaim_bar, float(qml.key_level))] = state
+
+    # Immediately after qml = qmls[-1]:
+    selected_lifecycle = lifecycle_by_qml.get((qml.reclaim_bar, float(qml.key_level)))
+    qml_id = f"{side}:{qml.reclaim_bar}:{float(qml.key_level):.12g}"
+    qml_state = selected_lifecycle["state"] if selected_lifecycle is not None else "unknown"
+    qml_state_reason = (
+        selected_lifecycle["reason"] if selected_lifecycle is not None else "h12_lifecycle_unavailable"
+    )
+```
+
+Extend `EntrySetup` with defaulted additive fields so legacy positional constructors remain valid:
+
+```python
+    qml_id: str | None = None
+    qml_state: Literal["active", "protected", "played_out", "unknown"] = "unknown"
+    qml_state_reason: str = "h12_lifecycle_unavailable"
+```
+
+Add `Literal` to the existing typing imports. In the final `EntrySetup(...)` return, pass
+`qml_id=qml_id`, `qml_state=qml_state`, and `qml_state_reason=qml_state_reason`. `_EMPTY_SETUP`
+continues to use the defaults. This exposes the scanner's existing lifecycle decision so MIDAS can
+consume it without reclassification or reviving a superseded/rejected QML.
 
 > The Aggressive branch (`entry.py:900-901`) already produces `(qml.key_level, "Aggressive",
 > "none")`; this change only ensures it is *reached* when `df_15m` is None/empty by skipping the
@@ -831,6 +867,8 @@ POI, that the POI sits in the correct half of the H12 dealing range, and that gr
 
 ```python
 # tests/test_authorization.py
+from dataclasses import replace
+
 import pandas as pd
 import pytest
 
@@ -963,6 +1001,21 @@ def test_missing_qml_is_no_trade(monkeypatch):
     assert "no_valid_qml" in decision.reasons
 
 
+def test_played_out_qml_cannot_be_reauthorized(monkeypatch):
+    zone = HtfPoiZone("Breaker", "Bullish", 100.0, 95.0, 5, 7, True, "lux_breaker_block")
+    monkeypatch.setattr(auth_mod, "build_htf_poi_source",
+                        lambda *a, **k: HtfPoiSourceSet((zone,), (), (zone,)))
+    monkeypatch.setattr(auth_mod, "dealing_range",
+                        lambda *a, **k: DealingRange(140.0, 60.0, 100.0, "Bullish"))
+    stale = replace(_entry(), qml_state="played_out", qml_state_reason="campaign_dol_met")
+    decision = authorize_track1_setup(
+        pd.DataFrame({"close": [97.0]}), requested_side="Long", inputs=_inputs(),
+        result=_result("B"), entry=stale, levels=_levels(), left=2, right=2,
+    )
+    assert decision.state == "monitor_only"
+    assert "qml_lifecycle_terminal" in decision.reasons
+
+
 @pytest.mark.parametrize(
     ("rating", "h12_range", "expected_reason"),
     [
@@ -1013,6 +1066,8 @@ def test_scan_pair_track1_mode_exposes_scanner_authorization(monkeypatch):
         authorized_direction=None,
         poi_authorized=False,
         governing_poi=None,
+        qml_id="Long:10:97",
+        qml_state="active",
         reasons=("campaign_dol_unresolved",),
     )
     monkeypatch.setattr(scan_mod, "authorize_track1_setup", lambda *a, **k: expected)
@@ -1060,6 +1115,8 @@ class SetupAuthorization:
     authorized_direction: Literal["Long"] | None
     poi_authorized: bool
     governing_poi: HtfPoiZone | None
+    qml_id: str | None
+    qml_state: Literal["active", "protected", "played_out", "unknown"] | None
     reasons: tuple[str, ...]
 
 
@@ -1096,6 +1153,8 @@ def authorize_track1_setup(
         reasons.append("h12_not_discount")
     if entry is None or entry.entry is None or qml is None:
         reasons.append("no_valid_qml")
+    if entry is not None and entry.qml_state == "played_out":
+        reasons.append("qml_lifecycle_terminal")
     if not poi_authorized:
         reasons.append("qml_outside_governing_poi")
     if not str(result.rating).startswith(("A", "B")):
@@ -1117,6 +1176,8 @@ def authorize_track1_setup(
         authorized_direction="Long" if state == "authorized" else None,
         poi_authorized=poi_authorized,
         governing_poi=governing,
+        qml_id=entry.qml_id if entry is not None else None,
+        qml_state=entry.qml_state if entry is not None else None,
         reasons=tuple(reasons),
     )
 ```
@@ -1222,7 +1283,8 @@ git add -A && git commit -m "test(scanner): integration gate for trade-levels ex
 
 - **Spec coverage** (recon §1): §1a sweep-independent DOL → Task 1; §1b stop + pivot fallback +
   provenance → Task 1/Task 2; §1c full REQ-039 record (entry/stop/campaign-DOL/checklist-DOL, one
-  as-of frame/config) → Task 2; §1d M15 spread → Task 3/Task 5; explicit aggressive mode and fixed
+  as-of frame/config) → Task 2; §1d M15 spread plus existing selected-QML lifecycle provenance →
+  Task 3/Task 5; explicit aggressive mode and fixed
   spot-long profile → Task 4; governing-POI authorization/no-naked-QML → Task 6. ✅
 - **Type consistency:** `TradeLevels`/`StopPlan`/`DolTarget` names and fields identical across Tasks
   1–2; `resolve_trade_levels` signature stable; public `ExecutionMode` maps once to the existing
@@ -1230,7 +1292,8 @@ git add -A && git commit -m "test(scanner): integration gate for trade-levels ex
 - **Placeholder scan:** tests use the real `_H1_DF`, `_h1_qml`, `_ltf_chain`,
   `_qml_chain_frames`, and `_min_frames` helpers or define complete deterministic data inline. No
   conditional assertion can false-green. ✅
-- **Scope:** no QML supersession / H4 / D1 (frozen). The exit-lifecycle (campaign-DOL completion,
+- **Scope:** no changes to QML supersession semantics / H4 / D1 (frozen); Task 3 only exports the
+  existing classifier result for the selected QML. The exit-lifecycle (campaign-DOL completion,
   opposing-HTF invalidation, RiskPolicy reduction) is **MIDAS-runtime plan**, not here — this plan
   only *exports* the levels MIDAS will act on. ✅
 
