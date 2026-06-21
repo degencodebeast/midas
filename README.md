@@ -5,11 +5,15 @@
 dashboard from `web/`. The LLM advisor is off by default, key-gated, clamp-only,
 and returns `None` on failure; policy is fail-closed.
 
-**Current status:** the component runtime and paper execution logic are implemented
-and unit-tested (227 tests pass). However, end-to-end run-assembly — the production
-`App` object, `cli._cmd_run`, and `reconcile_unfinished` — is **not yet implemented**,
-so `magic-agent run` cannot be launched in any mode today (`cli._cmd_run` raises
-`NotImplementedError`). This is tracked as the next task. See
+**Current status:** the production run-assembly (`App` + `build_app(mode)` +
+`cli._cmd_run` + `reconcile_unfinished`) is implemented and **paper mode is now
+runnable** (294 tests pass). `uv run magic-agent run --executor paper --max-iters 1`
+completes an offline cycle with exit code 0 — no network, no funds, no signing
+(uses `FixtureCmcClient` + `FixtureFrameSource`). The offline paper feed monitors
+the fixtured symbol set (ZEC fixture committed); live wiring restores the full
+pinned set and real gate.io data (`--extra live`). Live execution
+(`--executor twak`) is still a `NotImplementedError` stub pending live wiring
+(x402 hardening, `git+https` scanner pin, bnbagent-sdk surface validation). See
 [`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md) for the activation runbook
 and known limitations.
 
@@ -51,7 +55,8 @@ uv run magic-agent serve --host 127.0.0.1 --port 8000
 On-chain identity is **opt-in** and independent of the trading path. Without it the
 dashboard shows `unregistered` — `cli._resolve_agent_id()` returns `None` when
 the SDK is absent or unconfigured, and never fabricates an id. (Identity does not
-gate the runtime; note the runtime itself is not yet launchable — see Current status.)
+gate the runtime; paper mode is now runnable — see Current status. Live mode remains
+a stub pending live wiring.)
 
 ```bash
 uv sync --extra identity            # or: pip install 'magic-agent[identity]'
@@ -128,14 +133,14 @@ will wire `PaperExecutionAdapter` (simulated fills, no funds, full decision logg
 Live execution (`--executor twak`) is an explicit opt-in and requires completing every
 gate in the [activation runbook](docs/track1-spot-runbook.md) first.
 
-**Note:** `magic-agent run` is not yet launchable in any mode — `cli._cmd_run` raises
-`NotImplementedError` (end-to-end run-assembly is the next task). The paper and live
-commands below show the intended interface once run-assembly is complete:
+**Note:** paper mode is fully runnable as of commit `65c32cd`. Live mode
+(`--executor twak`) remains a `NotImplementedError` stub — all activation gates in
+the [runbook](docs/track1-spot-runbook.md) must be met before live is wired.
 
 ```bash
-# NOT YET FUNCTIONAL — pending run-assembly task
-uv run magic-agent run                   # paper (default — safe, no funds)
-uv run magic-agent run --executor twak  # live — all activation gates must be met first
+uv run magic-agent run                           # paper (default — offline, no funds, no signing)
+uv run magic-agent run --executor paper --max-iters 1  # paper single-cycle smoke test
+uv run magic-agent run --executor twak           # live — NOT YET FUNCTIONAL (stub, raises NotImplementedError)
 ```
 
 ### Authority model
