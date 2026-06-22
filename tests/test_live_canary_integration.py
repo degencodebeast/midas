@@ -76,3 +76,36 @@ def test_normal_scoring_uses_grade_sizing_after_promotion(tmp_path):
 
     assert first_fraction == Decimal("0.0025")
     assert second_fraction == Decimal("0.005")
+
+
+def test_narrative_write_failure_does_not_block_promotion_or_persistence(tmp_path):
+    from types import SimpleNamespace
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+    app = _authorizing_app(tmp_path, _CostGate(approved=True))
+
+    def _boom(event):
+        raise OSError("disk full")
+
+    app.agent_narrative = SimpleNamespace(append=_boom)
+
+    run_cycle(app, now)
+
+    # Promotion still happened despite the narrative write blowing up.
+    assert app.state.canary_completed is True
+    assert app.state.canary_mode is False
+    assert app.state.promotion_reason == "canary_reconciled_cost_viable"
+    # End-of-cycle persistence still ran (state.json written).
+    assert (tmp_path / ".magic_agent" / "state.json").exists()
+
+
+def test_approved_canary_without_auto_promote_requires_manual(tmp_path):
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+    app = _authorizing_app(tmp_path, _CostGate(approved=True))
+    app.state.auto_promote_after_canary = False
+
+    run_cycle(app, now)
+
+    assert app.state.canary_completed is True
+    assert app.state.canary_mode is True
+    assert app.state.promotion_reason == "manual_promotion_required"
+    assert app.state.cost_viability_evidence["approved"] is True

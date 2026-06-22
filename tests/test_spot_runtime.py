@@ -74,6 +74,7 @@ def _app(*, authorized: bool, policy_present: bool = True, execution_eligible: b
             selected, risk, None, None, None, False, Decimal("0"), False,
         ),
         execution_coordinator=SimpleNamespace(submit=lambda intent, **evidence: executions.append(SimpleNamespace(state="RECONCILED", intent=intent))),
+        after_entry_submission=lambda **kwargs: None,
         decision_journal=SimpleNamespace(append=lambda decision, observed_at: None),
         compliance=SimpleNamespace(observe=lambda records, observed_at: alerts.append(SimpleNamespace(code="daily_qualification_at_risk")) if not records else None),
         execution_journal=SimpleNamespace(confirmed_records=lambda: executions),

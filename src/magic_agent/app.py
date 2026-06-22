@@ -38,6 +38,7 @@ same reconcile path the live coordinator uses — never optimistically off the i
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -48,7 +49,7 @@ from typing import Any
 from magic_agent.agent_narrative import AgentNarrativeJournal, live_entry_reconciled_event
 from magic_agent.candidate_source import CandidateSource
 from magic_agent.cmc_source import CmcCandidateSource, RawCmcQuote
-from magic_agent.cost_viability import evaluate_cost_viability
+from magic_agent.cost_viability import evaluate_cost_viability as _default_evaluate_cost_viability
 from magic_agent.compliance import ComplianceLedger
 from magic_agent.decision_pipeline import DecisionPipeline
 from magic_agent.eligibility import EligibilityLedger
@@ -73,6 +74,8 @@ from magic_agent.scanner_gateway import ScannerGateway
 from magic_agent.state_journal import StateJournal
 from magic_agent.twak import TwakRunner
 from magic_agent.watchlist import WatchlistManager, WatchlistState
+
+_log = logging.getLogger(__name__)
 
 # Pinned scanner commit recorded on every authorized setup (replay provenance).
 SCANNER_COMMIT = "5f92552e8fdd688808e2709eefc176ab681b7f4f"
@@ -330,7 +333,7 @@ class App:
         """Build the entry :class:`LifecycleObservation` via ``recovery.observe_entry``."""
         return recovery.observe_entry(setup, risk, now)
 
-    def evaluate_cost_viability(self, *, buy_quote: dict | None, sell_quote: dict | None, intended_risk_fraction, now) -> Any:
+    def evaluate_cost_viability(self, *, buy_quote: dict | None, sell_quote: dict | None, intended_risk_fraction, now: datetime) -> Any:
         if self.cost_viability is not None:
             return self.cost_viability.evaluate(
                 buy_quote=buy_quote,
@@ -338,26 +341,33 @@ class App:
                 intended_risk_fraction=intended_risk_fraction,
                 now=now,
             )
-        return evaluate_cost_viability(
+        # The module gate parses a string, so it receives now.isoformat() (a str) here,
+        # whereas an injected gate (above) receives the datetime directly.
+        return _default_evaluate_cost_viability(
             buy_quote=buy_quote,
             sell_quote=sell_quote,
             intended_risk_fraction=intended_risk_fraction,
             now=now.isoformat(),
         )
 
-    def after_entry_submission(self, *, intent, result: str, quote: dict | None, risk, now) -> None:
+    def after_entry_submission(self, *, intent, result: str, quote: dict | None, risk, now: datetime) -> None:
         if result != "RECONCILED":
             return
         if self.agent_narrative is not None:
-            self.agent_narrative.append(live_entry_reconciled_event(
-                now=now,
-                setup=intent.setup,
-                risk=risk,
-                mode="canary" if self.state.canary_mode else "normal_scoring",
-                execution_state=result,
-                tx_hash=None,
-                reason="supervised_canary_reconciled" if self.state.canary_mode else "live_entry_reconciled",
-            ))
+            try:
+                self.agent_narrative.append(live_entry_reconciled_event(
+                    now=now,
+                    setup=intent.setup,
+                    risk=risk,
+                    mode="canary" if self.state.canary_mode else "normal_scoring",
+                    execution_state=result,
+                    tx_hash=None,
+                    reason="supervised_canary_reconciled" if self.state.canary_mode else "live_entry_reconciled",
+                ))
+            except Exception:
+                # Narrative journaling is observability only — a write failure must
+                # NEVER abort the post-submit promotion/persistence path.
+                _log.exception("agent narrative append failed (non-fatal)")
         if not self.state.canary_mode:
             return
         decision = self.evaluate_cost_viability(

@@ -115,15 +115,13 @@ def run_cycle(app, now) -> None:
             result = app.execution_coordinator.submit(
                 decision.intent, quote=prepared.quote, policy=prepared.risk,
             )
-            hook = getattr(app, "after_entry_submission", None)
-            if hook is not None:
-                hook(
-                    intent=decision.intent,
-                    result=result,
-                    quote=prepared.quote,
-                    risk=prepared.risk,
-                    now=now,
-                )
+            app.after_entry_submission(
+                intent=decision.intent,
+                result=result,
+                quote=prepared.quote,
+                risk=prepared.risk,
+                now=now,
+            )
             break
     if app.watchlist.state.discovery_due(now):
         app.watchlist.mark_discovery(now)
