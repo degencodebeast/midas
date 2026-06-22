@@ -120,9 +120,13 @@ def run_cycle(app, now) -> None:
     for row in (*cmc_batch.exclusions, *batch.exclusions):
         _log.debug("  excluded %s: %s", row.symbol, row.reason_code)
     excluded_total = sum(excluded_reasons.values())
+    # Considered = eligible + excluded (everything weighed this cycle). Reporting
+    # `len(snapshots)` here understated the funnel (eligible draws from monitoring +
+    # discovery, not only the CMC snapshots), so eligible could exceed it — confusing.
+    considered_total = len(eligible) + excluded_total
     _log.info(
-        "universe: %d candidates → %d eligible %s · excluded %d: %s",
-        len(snapshots), len(eligible),
+        "universe: %d considered → %d eligible to scan %s · excluded %d: %s",
+        considered_total, len(eligible),
         f"[{', '.join(eligible_symbols)}]" if eligible_symbols else "[]",
         excluded_total, dict(excluded_reasons),
     )
@@ -173,11 +177,12 @@ def run_cycle(app, now) -> None:
         if decision.intent is not None:
             risk = prepared.risk
             # risk_budget_usd carries the deploy NOTIONAL; risk_fraction the effective
-            # margin (% of equity). Mirrors the decision journal + risk decision.
+            # margin FRACTION (0.025 == 2.5%), so ×100 for a true percent display.
+            margin = getattr(risk, "risk_fraction", None)
             _log.info(
                 "decision %s: ENTER size=$%s margin=%s%%",
                 candidate.symbol, _fmt(getattr(risk, "risk_budget_usd", None)),
-                _fmt(getattr(risk, "risk_fraction", None)),
+                _fmt(margin * 100) if margin is not None else "?",
             )
             result = app.execution_coordinator.submit(
                 decision.intent, quote=prepared.quote, policy=prepared.risk,
