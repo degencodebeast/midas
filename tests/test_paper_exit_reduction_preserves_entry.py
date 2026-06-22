@@ -81,12 +81,12 @@ def _gold_position() -> ReconciledPosition:
 def _partial_reduction_state() -> PortfolioRiskState:
     """A risk state that makes ``reduction_for`` return a PARTIAL (not full) reduce.
 
-    With defaults (``daily_loss_fraction=0.015``, ``max_open_risk=0.01``) and
-    equity/anchor 1000, no realized daily loss:
-        daily_room      = 1000 * 0.015 = 15
-        open_risk_room  = 1000 * 0.01  = 10
-        allowed         = min(15, 10)  = 10
-        excess          = open_stressed_loss_usd (30) - allowed (10) = 20
+    With the small-account profile defaults (``daily_loss_fraction=0.10``,
+    ``max_open_risk=0.06``) and equity/anchor 1000, no realized daily loss:
+        daily_room      = 1000 * 0.10 = 100
+        open_risk_room  = 1000 * 0.06 = 60
+        allowed         = min(100, 60) = 60
+        excess          = open_stressed_loss_usd (80) - allowed (60) = 20
         reduce_qty      = min(qty 4, excess 20 / stressed_loss_per_unit 10) = 2
     => a PARTIAL reduction of 2 of 4 (the in-place shrink path), not a full close.
     """
@@ -95,7 +95,7 @@ def _partial_reduction_state() -> PortfolioRiskState:
         cash_usd=Decimal("1000"),
         peak_equity_usd=Decimal("1000"),
         daily_anchor_usd=Decimal("1000"),
-        open_stressed_loss_usd=Decimal("30"),
+        open_stressed_loss_usd=Decimal("80"),
     )
 
 

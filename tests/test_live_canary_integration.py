@@ -74,8 +74,11 @@ def test_normal_scoring_uses_grade_sizing_after_promotion(tmp_path):
     run_cycle(app, now)
     second_fraction = app.execution_coordinator.confirmed_records()[1].evidence["policy"].risk_fraction
 
-    assert first_fraction == Decimal("0.0025")
-    assert second_fraction == Decimal("0.005")
+    # Small-account profile: canary_risk_fraction and a_grade_risk_fraction are both
+    # 0.05 now (the cash cap, not the risk fraction, binds the small-account deploy),
+    # so the canary and the post-promotion normal-scoring trade carry the same fraction.
+    assert first_fraction == Decimal("0.05")
+    assert second_fraction == Decimal("0.05")
 
 
 def test_narrative_write_failure_does_not_block_promotion_or_persistence(tmp_path):

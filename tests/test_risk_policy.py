@@ -4,7 +4,83 @@ from magic_agent.risk_policy import (
     MarketRiskContext, PortfolioRiskState, QuantityCaps, RiskConfig,
     evaluate_risk, position_risk_reduction,
 )
+from magic_agent.runtime_state import RuntimeState
 from magic_agent.spot_models import ActionPurpose, AuthorizedSetup
+
+
+# Small-account live profile (~$20 equity / ~$10 deployable USDC) -------------------
+# These are the operator-facing proof that one trade deploys ~the full USDC (~$9.7)
+# and risks ~$0.50 at a ~5% stop, with the CASH cap (not the risk-fraction budget)
+# binding and every internal gate passing.
+
+
+def test_small_account_five_percent_stop_deploys_full_usdc_and_risks_half_dollar():
+    # equity $20, deployable USDC $10. A-grade setup, entry 100, stop 95 (5% below).
+    state = RuntimeState.new_live_session(
+        equity_usd=Decimal("20"), cash_usd=Decimal("10"),
+    ).risk_state()
+    setup = AuthorizedSetup.example(
+        grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+        campaign_dol=Decimal("120"),
+    )
+    decision = evaluate_risk(
+        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
+        QuantityCaps.unbounded(), MarketRiskContext.aligned(),
+    )
+
+    assert decision.approved is True, decision.denied_by
+    notional = decision.final_qty * setup.entry
+    risk = decision.final_qty * (setup.entry - setup.structural_stop)
+    # Cash-capped deploy: ($10 - $20*0.015 reserve) = $9.70 of token.
+    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
+    assert abs(risk - Decimal("0.485")) < Decimal("0.03"), risk
+    # The cash cap binds, NOT the 5% risk-fraction budget (which would be $20 notional).
+    assert decision.final_qty < decision.base_qty
+
+
+def test_small_account_tighter_stop_is_still_cash_capped_at_full_usdc():
+    # With a TIGHTER 2% stop the risk-fraction budget sizes EVEN BIGGER, so the cash
+    # cap still binds at the same ~$9.7 deploy; only the risk drops (to ~$0.19).
+    state = RuntimeState.new_live_session(
+        equity_usd=Decimal("20"), cash_usd=Decimal("10"),
+    ).risk_state()
+    setup = AuthorizedSetup.example(
+        grade="A", entry=Decimal("100"), structural_stop=Decimal("98"),
+        campaign_dol=Decimal("120"),
+    )
+    decision = evaluate_risk(
+        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
+        QuantityCaps.unbounded(), MarketRiskContext.aligned(),
+    )
+
+    assert decision.approved is True, decision.denied_by
+    notional = decision.final_qty * setup.entry
+    risk = decision.final_qty * (setup.entry - setup.structural_stop)
+    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
+    assert abs(risk - Decimal("0.194")) < Decimal("0.03"), risk
+    assert decision.final_qty < decision.base_qty
+
+
+def test_small_account_canary_first_trade_also_deploys_full_usdc():
+    # The mandatory first live canary uses canary_risk_fraction (now 5%, == A-grade),
+    # so even the canary trade is cash-capped to ~$9.7 / ~$0.49 and passes every gate.
+    state = RuntimeState.new_live_session(
+        equity_usd=Decimal("20"), cash_usd=Decimal("10"),
+    ).risk_state()
+    setup = AuthorizedSetup.example(
+        grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+        campaign_dol=Decimal("120"),
+    )
+    decision = evaluate_risk(
+        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
+        QuantityCaps.unbounded(),
+        MarketRiskContext(Decimal("0"), Decimal("1"), Decimal("1"), canary=True),
+    )
+
+    assert decision.approved is True, decision.denied_by
+    assert decision.risk_fraction == Decimal("0.05")
+    notional = decision.final_qty * setup.entry
+    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
 
 
 def test_missing_config_denies_entry_but_allows_reconciled_exit():
@@ -33,9 +109,9 @@ def test_grade_and_counter_bias_momentum_reduce_risk_without_tightening_stop():
     aligned_a = evaluate_risk(AuthorizedSetup.example(grade="A", bias_alignment="aligned"), state, config, ActionPurpose.STRATEGY, caps, MarketRiskContext.aligned())
     counter_a = evaluate_risk(AuthorizedSetup.example(grade="A", bias_alignment="counter_bias"), state, config, ActionPurpose.STRATEGY, caps, MarketRiskContext.counter_bias_qualified())
     counter_b = evaluate_risk(AuthorizedSetup.example(grade="B", bias_alignment="counter_bias"), state, config, ActionPurpose.STRATEGY, caps, MarketRiskContext.counter_bias_qualified())
-    assert aligned_a.risk_fraction == Decimal("0.005")
-    assert counter_a.risk_fraction == Decimal("0.0025")
-    assert counter_b.risk_fraction == Decimal("0.00125")
+    assert aligned_a.risk_fraction == Decimal("0.05")
+    assert counter_a.risk_fraction == Decimal("0.025")
+    assert counter_b.risk_fraction == Decimal("0.0125")
     assert counter_a.final_qty == aligned_a.final_qty / 2
 
 
@@ -118,7 +194,7 @@ def test_real_scanner_counter_bias_promotion_reaches_half_risk(monkeypatch):
         QuantityCaps.unbounded(), MarketRiskContext.counter_bias_qualified(),
     )
     assert decision.approved
-    assert decision.risk_fraction == Decimal("0.00125")
+    assert decision.risk_fraction == Decimal("0.0125")
 
 
 def test_drawdown_consecutive_stop_concurrency_and_stale_equity_gates():
@@ -149,18 +225,26 @@ def test_three_percent_drawdown_throttles_and_correlation_bucket_caps_all_longs(
     normal = evaluate_risk(AuthorizedSetup.example(), PortfolioRiskState.example(), config, ActionPurpose.STRATEGY, caps, market)
     throttled = evaluate_risk(AuthorizedSetup.example(), PortfolioRiskState.example(equity_usd=Decimal("970"), daily_anchor_usd=Decimal("970")), config, ActionPurpose.STRATEGY, caps, market)
     assert throttled.risk_fraction == normal.risk_fraction * Decimal("0.50")
+    # New small-account caps: bucket cap = equity(1000)*max_correlation_bucket_risk(0.06)
+    # = 60. Default B-grade sizing here is base=2.5 qty -> new_stressed_loss=25 (well
+    # under the open_risk_cap of 60 with open_stressed_loss=0, so that gate passes
+    # first). Seed the correlation bucket at 40 so projected_bucket = 40 + 25 = 65 > 60
+    # and ONLY the correlation_bucket_cap fires.
     bucket_full = evaluate_risk(
         AuthorizedSetup.example(),
-        PortfolioRiskState.example(correlation_bucket_stressed_loss_usd=Decimal("8")),
+        PortfolioRiskState.example(correlation_bucket_stressed_loss_usd=Decimal("40")),
         config, ActionPurpose.STRATEGY, caps, market,
     )
     assert bucket_full.denied_by == "correlation_bucket_cap"
 
 
 def test_position_risk_reduction_returns_quantity_needed_to_restore_budget():
+    # New caps: daily_room = 1000*daily_loss_fraction(0.10) = 100; open_risk_room =
+    # 1000*max_open_risk(0.06) = 60; allowed = min = 60. Seed open_stressed_loss at 65
+    # so excess = 65 - 60 = 5 and reduce_qty = min(qty 2, 5/10) = 0.5.
     state = PortfolioRiskState.example(
         equity_usd=Decimal("1000"), daily_anchor_usd=Decimal("1000"),
-        open_stressed_loss_usd=Decimal("15"),
+        open_stressed_loss_usd=Decimal("65"),
     )
     position = type("Position", (), {
         "quantity": Decimal("2"), "stressed_loss_per_unit": Decimal("10"),
@@ -191,13 +275,15 @@ def test_req044_drawdown_emergency_review_at_eight_percent_ladder_rung():
 def test_req044_open_risk_cap_isolated_from_correlation_bucket_cap():
     # open_risk_cap is checked BEFORE correlation_bucket_cap (lines 184 vs 187 in source).
     # correlation_bucket_stressed_loss_usd=0 keeps projected_bucket=new_stressed_loss well
-    # within the bucket cap (5 < 10), so open_risk_cap fires alone on the portfolio total.
-    # open_stressed_loss_usd=9.5 + new_stressed_loss=5 → projected=14.5 > equity*0.01=10.
+    # within the bucket cap (5 < 60), so open_risk_cap fires alone on the portfolio total.
+    # A-grade sizing here is token-capped to 5 qty (token_cap = 1000*0.5/100), so
+    # new_stressed_loss = 5*1 = 5. open_stressed_loss_usd=56 + 5 = 61 > equity*max_open_risk
+    # (1000*0.06 = 60).
     decision = evaluate_risk(
         AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("99")),
         PortfolioRiskState.example(
             equity_usd=Decimal("1000"),
-            open_stressed_loss_usd=Decimal("9.5"),
+            open_stressed_loss_usd=Decimal("56"),
             correlation_bucket_stressed_loss_usd=Decimal("0"),  # isolates from bucket cap
         ),
         RiskConfig.defaults(), ActionPurpose.STRATEGY,
@@ -208,14 +294,18 @@ def test_req044_open_risk_cap_isolated_from_correlation_bucket_cap():
 
 
 def test_req044_daily_loss_cap_denies_when_existing_loss_plus_new_exposure_exceeds_fraction():
-    # existing daily_loss=15 (daily_anchor=1000, equity=985) + new stressed_loss=5 = 20 >
-    # daily_anchor*0.015=15 → daily_loss_cap.  open_stressed_loss_usd=0 keeps projected=5
-    # below open_risk_cap(10) and correlation_bucket_cap(10), so neither fires first.
+    # New daily_loss_fraction is 0.10. Drive a large existing intraday loss WITHOUT
+    # tripping the drawdown gates (which key off peak=1000, so equity=985 is only a 1.5%
+    # drawdown). daily_anchor=1100, equity=985 -> daily_loss=115. A-grade is token-capped
+    # to 5 qty -> new stressed_loss=5; projected total=5 (open_stressed_loss=0) stays
+    # under open_risk_cap (985*0.06=59.1) and correlation_bucket_cap so neither fires
+    # first. daily_loss(115) + projected(5) = 120 > daily_anchor*daily_loss_fraction
+    # (1100*0.10 = 110) -> daily_loss_cap.
     decision = evaluate_risk(
         AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("99")),
         PortfolioRiskState.example(
             equity_usd=Decimal("985"),
-            daily_anchor_usd=Decimal("1000"),
+            daily_anchor_usd=Decimal("1100"),
             open_stressed_loss_usd=Decimal("0"),
             correlation_bucket_stressed_loss_usd=Decimal("0"),
         ),
@@ -281,7 +371,7 @@ def test_req044_below_minimum_notional_returns_zero_quantity():
         pool_share_qty=Decimal("Infinity"),
         concentration_qty=Decimal("Infinity"),
         gap_stress_qty=Decimal("Infinity"),
-        minimum_notional_usd=Decimal("9999"),  # entry(100)*base_qty(0.5)=50 < 9999
+        minimum_notional_usd=Decimal("9999"),  # capped notional (~$250) << 9999
     )
     decision = evaluate_risk(
         AuthorizedSetup.example(),
@@ -350,11 +440,12 @@ def test_req044_missing_policy_denies_strategy_and_reduction_failsafe_returns_fu
 def test_req044_position_risk_reduction_invalid_stress_returns_full_qty_as_failsafe():
     # stressed_loss_per_unit <= 0 with config present → "invalid_position_stress_reduce_only".
     # This covers the second fail-safe branch in position_risk_reduction (line 207 in source).
-    # open_stressed_loss_usd=15 > allowed=10 so excess > 0 (enters the branch), then
-    # stressed_loss_per_unit=0 triggers the guard before division occurs.
+    # New caps: allowed = min(daily_room 100, open_risk_room 60) = 60. open_stressed_loss_usd=65
+    # > 60 so excess > 0 (enters the branch), then stressed_loss_per_unit=0 triggers the guard
+    # before division occurs.
     state = PortfolioRiskState.example(
         equity_usd=Decimal("1000"), daily_anchor_usd=Decimal("1000"),
-        open_stressed_loss_usd=Decimal("15"),
+        open_stressed_loss_usd=Decimal("65"),
     )
     position = type("Position", (), {
         "quantity": Decimal("4"), "stressed_loss_per_unit": Decimal("0"),  # invalid

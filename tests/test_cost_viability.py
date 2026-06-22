@@ -196,6 +196,41 @@ def test_cost_viability_fails_closed_when_neither_schema_present():
     assert decision.denied_by != ()
 
 
+def test_small_account_default_cap_admits_one_percent_per_leg_live_round_trip():
+    # Small-account profile: the DEFAULT round-trip cap is now 300 bps (was 150). The
+    # real TWAK quote's ~1%/leg slippage spread is ~200 bps round trip, which the OLD
+    # 150 bps default DENIED (blocking every live promotion). With no explicit config
+    # it must now PASS on the default cap.
+    decision = evaluate_cost_viability(
+        buy_quote=_live_quote(),
+        sell_quote=_live_quote(),
+        intended_risk_fraction=Decimal("0.05"),
+        now="2026-06-22T12:00:00Z",
+    )
+
+    assert decision.approved is True, decision.denied_by
+    rt = Decimal(decision.evidence["estimated_round_trip_cost_bps"])
+    assert Decimal("180") < rt < Decimal("220"), rt
+    assert decision.evidence["max_round_trip_cost_bps"] == "300"
+
+
+def test_small_account_default_cap_still_denies_a_genuinely_too_wide_spread():
+    # A ~2%/leg spread (~400 bps round trip) is genuinely too costly and must still be
+    # denied by the raised 300 bps default cap.
+    wide = _live_quote(output_qty="100", minimum_output="98")  # ~200 bps spread/leg
+    decision = evaluate_cost_viability(
+        buy_quote=wide,
+        sell_quote=wide,
+        intended_risk_fraction=Decimal("0.05"),
+        now="2026-06-22T12:00:00Z",
+    )
+
+    assert decision.approved is False
+    assert decision.denied_by == ("round_trip_cost_too_high",)
+    rt = Decimal(decision.evidence["estimated_round_trip_cost_bps"])
+    assert Decimal("380") < rt < Decimal("420"), rt
+
+
 def test_cost_viability_handles_naive_now_without_crash():
     decision = evaluate_cost_viability(
         buy_quote=_quote(),

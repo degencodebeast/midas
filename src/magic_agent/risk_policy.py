@@ -34,10 +34,28 @@ class RiskConfig:
 
     @classmethod
     def defaults(cls) -> "RiskConfig":
+        # Small-account profile for the ~$20 live competition wallet (~$10 deployable
+        # USDC). The operator wants each trade to deploy ~the full USDC (~$9.7) and
+        # risk ~$0.50 at a ~5% stop, so the CASH cap (not the risk-fraction budget)
+        # must bind. Each knob below is reconciled for that coherent outcome:
+        #   * risk fractions raised to ~5% (canary + A; B half of A) so budget/stop
+        #     sizing (e.g. 0.05*$20/5 = 0.2 qty = $20 notional) OVERSHOOTS the cash
+        #     cap and is clamped down to it rather than capping risk below the cash.
+        #   * stable_reserve_fraction dropped to a SMALL 1.5% (~$0.30 of $20) so the
+        #     cash cap = ($10 - $0.30)/entry deploys ~$9.7, not the large-account
+        #     30% (~$6) reserve that would clamp the deploy to ~$4.
+        #   * max_token_fraction 0.5 lets a ~$10 = 50%-of-equity single-token position
+        #     through (0.25 would cap it at $5).
+        #   * max_open_risk / max_correlation_bucket_risk raised to 6% so a single
+        #     ~$0.49-risk position (~2.4% of $20) is not blocked (headroom for one).
+        #   * daily_loss_fraction 10% so a couple of ~$0.50 losses don't halt after one
+        #     (1.5% of $20 = $0.30 would halt after the first stop-out).
+        # Core safety KEPT: 30% hard-DQ, single concurrent position, a (small) stable
+        # reserve, and the consecutive-stop halt (kept at 3).
         return cls(
-            Decimal("0.0025"), Decimal("0.005"), Decimal("0.0025"), Decimal("0.50"),
-            Decimal("0.50"), Decimal("0.01"), Decimal("0.01"), 1, 2,
-            Decimal("0.25"), Decimal("0.30"), Decimal("0.015"), 3,
+            Decimal("0.05"), Decimal("0.05"), Decimal("0.025"), Decimal("0.50"),
+            Decimal("0.50"), Decimal("0.06"), Decimal("0.06"), 1, 2,
+            Decimal("0.50"), Decimal("0.015"), Decimal("0.10"), 3,
             Decimal("0.03"), Decimal("0.05"), Decimal("0.08"), Decimal("0.30"),
         )
 

@@ -8,7 +8,14 @@ from typing import Any
 
 @dataclass(frozen=True)
 class CostViabilityConfig:
-    max_round_trip_cost_bps: Decimal = Decimal("150")
+    # Small-account live profile: the real TWAK CLI quote applies a default ~1%/leg
+    # slippage spread, so a USDC<->token round trip costs ~200 bps from the spread
+    # alone (see live_quotes.py / the spread-only cost model below). The previous
+    # 150 bps ceiling was a large-account value that denied EVERY real round trip and
+    # blocked promotion. 300 bps accommodates the 1% default-slippage round trip
+    # (~200 bps) plus margin, while a genuinely too-wide spread (e.g. ~400 bps round
+    # trip) still denies.
+    max_round_trip_cost_bps: Decimal = Decimal("300")
 
 
 @dataclass(frozen=True)
