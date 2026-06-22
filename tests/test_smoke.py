@@ -18,3 +18,16 @@ def test_runbook_has_supervised_live_canary_gate():
     assert "quote-only smoke" in text
     assert "confirmed and reconciled" in text
     assert "do not enable systemd" in text
+
+
+def test_runbook_documents_live_canary_to_scoring_process():
+    from pathlib import Path
+
+    text = Path("docs/track1-spot-runbook.md").read_text(encoding="utf-8")
+
+    assert "mandatory first live canary" in text
+    assert "canary_risk_fraction = 0.0025" in text
+    assert "promote to normal scoring mode" in text
+    assert "minimum trade-count pace" in text
+    assert "cost viability" in text
+    assert "smart-money and LLM supervisor are deferred" in text

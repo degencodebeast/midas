@@ -359,3 +359,42 @@ funded or unsupervised live run, and the systemd unit MUST stay disabled until t
 Until all four are closed, operate only the supervised quote-only smoke and a single
 operator-watched canary; do not enable systemd (keep the unit disabled) and do not
 run autonomously.
+
+---
+
+## Track 1 Live Canary To Scoring Run
+
+The first `magic-agent run --executor twak` activation uses a mandatory first live canary. The canary is a supervised safety gate, not the scoring mode.
+
+Canary rules:
+
+- `canary_risk_fraction = 0.0025`
+- scanner authorization is still required
+- RiskPolicy approval is still required
+- exact-size TWAK quote is required
+- TWAK submission must confirm on BSC
+- balance-delta reconciliation must book the position
+- failed, timed-out, or `BROADCAST_UNKNOWN` canary attempts do not promote
+
+Promotion rules:
+
+- after a reconciled canary and passing cost viability, the runtime may promote to normal scoring mode
+- normal scoring uses RiskPolicy sizing: A-family aligned up to 0.50%, B-family aligned up to 0.25%, counter-bias with the 0.50x multiplier
+- hard-DQ, daily halt, drawdown throttle, concurrency cap, token cap, stable reserve, stale equity, and consecutive-stop halt remain active
+
+Qualification:
+
+- the runtime tracks minimum trade-count pace
+- behind-pace warnings may increase operator attention or discovery urgency
+- behind-pace status cannot force trades or bypass scanner authorization
+
+Cost viability:
+
+- before autonomous normal scoring mode, live quotes must show that gas, swap fees, slippage, and impact do not obviously dominate the intended order size
+- malformed, expired, missing, or zero-output quote data fails closed
+
+Agent narrative:
+
+- the dashboard and journals should show observed -> scanned -> authorized or denied -> sized -> quoted -> signed -> reconciled -> monitored or exited
+- smart-money and LLM supervisor are deferred from the live canary critical path
+- future smart-money or LLM features must be advisory, non-blocking, and unable to alter scanner, stop, DOL, or RiskPolicy authority
