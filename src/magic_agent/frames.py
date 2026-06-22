@@ -154,7 +154,12 @@ class GateioFrameSource:
                 "live market data. Install it with `uv add ccxt` (or the project's "
                 "'live' extra: `uv sync --extra live`)."
             ) from exc
-        self._exchange = ccxt.gateio({"enableRateLimit": True})
+        # ccxt 4.5 renamed the gate.io class `gateio` -> `gate`; support both so the
+        # live frame source works across ccxt versions.
+        exchange_cls = getattr(ccxt, "gate", None) or getattr(ccxt, "gateio", None)
+        if exchange_cls is None:
+            raise RuntimeError("ccxt exposes no 'gate'/'gateio' exchange class")
+        self._exchange = exchange_cls({"enableRateLimit": True})
         return self._exchange
 
     def closed_frames(self, candidate: Any) -> dict[str, pd.DataFrame]:
