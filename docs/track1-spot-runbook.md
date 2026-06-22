@@ -338,25 +338,27 @@ The Phase 0 live wiring is fail-closed but incomplete. The supervised quote-only
 smoke above is safe (no funds move), but the following MUST be closed before any
 funded or unsupervised live run, and the systemd unit MUST stay disabled until then:
 
-1. Real BSC RPC client. `build_app(mode="twak")` defaults the receipt/confirmation
-   port to `_FailClosedLiveRpc` (reports status `0x0` / zero confirmations), which by
-   design cannot reconcile a swap into a booked position. A real BSC RPC client that
-   reads `BSC_RPC_URL` (transaction receipt + confirmation depth) MUST be built and
-   injected as `live_rpc` before a funded canary can book.
-2. Coordinator post-swap balance read. The post-broadcast balance snapshot in the
-   execution coordinator is outside the broadcast try/except; a malformed balance read
-   after a real swap must be mapped to a fail-closed terminal state (blocks new
-   exposure) rather than crashing the cycle.
-3. Live sell idempotency. The TWAK sell path has no execution-journal idempotency
+1. Real BSC RPC client — DONE. `build_app(mode="twak")` now defaults the
+   receipt/confirmation port to the real `BscRpcClient` (`live_rpc.py`), which reads
+   `BSC_RPC_URL` and queries the transaction receipt + confirmation depth over
+   stdlib JSON-RPC. It fails closed: a receipt-poll timeout or RPC/transport error
+   RAISES (never a fabricated `0x0` receipt), so the coordinator maps it to a
+   `BROADCAST_UNKNOWN` (exposure-blocking) outcome. Construction is lazy (no chain
+   call until a cycle runs), so a funded canary can now book. The coordinator's
+   post-swap reads (confirmations + post balance snapshot + reconcile) are also now
+   guarded: a fault there returns `MINED` / `BROADCAST_UNKNOWN` (a non-terminal,
+   exposure-blocking state) instead of crashing the cycle. Inject `live_rpc` only to
+   override the default with a stub.
+2. Live sell idempotency. The TWAK sell path has no execution-journal idempotency
    record; a sell broadcast whose response is lost must map to a safe terminal state
    so a protective exit is not re-broadcast on the next cycle.
-4. Chain-truth restart rebuild. Live restart still loads the paper position store;
+3. Chain-truth restart rebuild. Live restart still loads the paper position store;
    before unsupervised live operation, open-position truth must be rebuilt from
    reconciled execution evidence + chain balances (`rebuild_positions_from_chain`)
    instead of `positions.json`, so a restart cannot re-enter a position already held
    on-chain.
 
-Until all four are closed, operate only the supervised quote-only smoke and a single
+Until the remaining gaps are closed, operate only the supervised quote-only smoke and a single
 operator-watched canary; do not enable systemd (keep the unit disabled) and do not
 run autonomously.
 

@@ -223,6 +223,72 @@ def test_missing_tx_hash_is_broadcast_unknown(tmp_path):
     assert journal.get("intent-1").state is ExecutionState.BROADCAST_UNKNOWN
 
 
+class RaisingReceiptRpc:
+    """Fake RPC whose wait_receipt RAISES (e.g. real receipt-poll timeout)."""
+
+    def __init__(self, *, nonce: int = 7) -> None:
+        self._nonce = nonce
+
+    def wallet_nonce(self) -> int:
+        return self._nonce
+
+    def wait_receipt(self, tx_hash: str) -> dict:
+        from magic_agent.live_rpc import RpcError
+
+        raise RpcError("receipt timeout")
+
+    def confirmations(self, receipt: dict) -> int:  # pragma: no cover - never reached
+        return 2
+
+
+class RaisingPostSnapshotBalances:
+    """Fake balances: pre snapshot succeeds, the post-swap snapshot RAISES."""
+
+    def __init__(self, pre: dict) -> None:
+        self._pre = pre
+        self._index = 0
+
+    def snapshot(self, identity_key: str) -> dict:
+        self._index += 1
+        if self._index == 1:
+            return dict(self._pre)
+        raise RuntimeError("balance read failed after swap")
+
+
+def test_wait_receipt_failure_maps_to_broadcast_unknown_and_books_nothing(tmp_path):
+    twak = FakeTwak()
+    rpc = RaisingReceiptRpc()
+    balances = FakeBalances([
+        {"stable": Decimal("100"), "token": Decimal("0")},
+    ])
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    result = coord.submit(_intent(), quote={"price": "1"}, policy=PolicyConfig(max_notional=1000.0))
+
+    assert result == "BROADCAST_UNKNOWN"
+    assert positions.calls == []
+    # SUBMITTED -> BROADCAST_UNKNOWN is a valid transition; the record is non-terminal
+    # so recovery.reconcile_unfinished blocks new exposure next cycle (fail closed).
+    assert journal.get("intent-1").state is ExecutionState.BROADCAST_UNKNOWN
+
+
+def test_post_swap_balance_read_failure_returns_mined_and_books_nothing(tmp_path):
+    twak = FakeTwak()
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = RaisingPostSnapshotBalances({"stable": Decimal("100"), "token": Decimal("0")})
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    # The post-MINED read raising must NOT crash the cycle; it returns MINED and
+    # leaves the record at the non-terminal MINED state (recovery blocks next cycle).
+    result = coord.submit(_intent(), quote={"price": "1"}, policy=PolicyConfig(max_notional=1000.0))
+
+    assert result == "MINED"
+    assert positions.calls == []
+    assert journal.get("intent-1").state is ExecutionState.MINED
+
+
 def test_idempotent_rerun_does_not_double_submit_or_double_book(tmp_path):
     twak = FakeTwak()
     rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)

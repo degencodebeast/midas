@@ -63,16 +63,34 @@ class ExecutionCoordinator:
             )
             return "BROADCAST_UNKNOWN"
         self.journal.transition(intent.intent_id, ExecutionState.SUBMITTED, tx_hash=tx_hash)
-        receipt = self.rpc.wait_receipt(tx_hash)
+        # Fail closed on a receipt-poll failure: the real BscRpcClient RAISES on a
+        # receipt timeout or RPC/transport error rather than fabricating a result.
+        # SUBMITTED -> BROADCAST_UNKNOWN is a valid, exposure-blocking transition;
+        # recovery.reconcile_unfinished blocks new exposure next cycle.
+        try:
+            receipt = self.rpc.wait_receipt(tx_hash)
+        except Exception as exc:
+            self.journal.transition(
+                intent.intent_id, ExecutionState.BROADCAST_UNKNOWN, error=str(exc),
+            )
+            return "BROADCAST_UNKNOWN"
         self.journal.transition(intent.intent_id, ExecutionState.MINED, receipt=receipt)
-        confirmations = self.rpc.confirmations(receipt)
-        post = self.balances.snapshot(intent.setup.identity_key)
-        result = reconcile_buy(
-            receipt=receipt, confirmations=confirmations,
-            required_confirmations=self.required_confirmations,
-            stable_before=pre["stable"], stable_after=post["stable"],
-            token_before=pre["token"], token_after=post["token"],
-        )
+        # The post-MINED reads (confirmations + post balance snapshot + reconcile) can
+        # fault on a real chain/CLI error. Returning "MINED" WITHOUT transitioning
+        # leaves the record at the non-terminal MINED state (so recovery blocks new
+        # exposure next cycle) — never a crash, and never the invalid
+        # MINED -> BROADCAST_UNKNOWN transition.
+        try:
+            confirmations = self.rpc.confirmations(receipt)
+            post = self.balances.snapshot(intent.setup.identity_key)
+            result = reconcile_buy(
+                receipt=receipt, confirmations=confirmations,
+                required_confirmations=self.required_confirmations,
+                stable_before=pre["stable"], stable_after=post["stable"],
+                token_before=pre["token"], token_after=post["token"],
+            )
+        except Exception:
+            return "MINED"
         if result.state != "RECONCILED":
             return result.state
         self.journal.transition(intent.intent_id, ExecutionState.CONFIRMED)

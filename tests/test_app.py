@@ -669,11 +669,13 @@ def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatc
     assert app.state.canary_mode is True
 
 
-def test_build_app_twak_rpc_default_is_fail_closed(tmp_path, monkeypatch):
+def test_build_app_twak_rpc_default_is_real_bsc_client(tmp_path, monkeypatch):
     from types import SimpleNamespace
     for name in ("TWAK_ACCESS_ID","TWAK_HMAC_SECRET","TWAK_WALLET_PASSWORD","BSC_RPC_URL","CMC_API_KEY","WALLET_ADDRESS"):
         monkeypatch.setenv(name, "test-secret")
     fake_twak = SimpleNamespace(json=lambda args, timeout=60: {"success": True, "data": {}})
+    # No live_rpc injected => the default is the real BscRpcClient (reads BSC_RPC_URL).
+    # Construction is lazy (no network), so this assembles without any chain call.
     app = build_app(
         mode="twak",
         root_dir=tmp_path,
@@ -682,11 +684,7 @@ def test_build_app_twak_rpc_default_is_fail_closed(tmp_path, monkeypatch):
         twak_runner=fake_twak,
         live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
     )
-    rpc = app.execution_coordinator.rpc
-    # Fail-closed default: never fabricates a success receipt.
-    assert rpc.confirmations({"blockNumber": "0x10"}) == 0
-    receipt = rpc.wait_receipt("0xabc")
-    assert receipt["status"] == "0x0"
+    assert app.execution_coordinator.rpc.__class__.__name__ == "BscRpcClient"
 
 
 def test_build_app_twak_still_fails_closed_without_required_secrets(tmp_path, monkeypatch):

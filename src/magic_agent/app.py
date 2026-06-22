@@ -61,6 +61,7 @@ from magic_agent.live_exits import TwakSellPorts
 from magic_agent.live_quotes import TwakQuoteProvider
 from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
+from magic_agent.live_rpc import BscRpcClient
 from magic_agent.paper_adapter import PaperExecutionAdapter
 from magic_agent.paper_exits import PaperExitPorts
 from magic_agent.position_manager import PositionManager
@@ -196,26 +197,6 @@ class _LiveExecutionView:
             record for record in self._journal.records.values()
             if record.state == ExecutionState.RECONCILED
         ]
-
-
-class _FailClosedLiveRpc:
-    """Default live RPC port: refuses to fabricate chain truth.
-
-    A real live run MUST inject a real BSC RPC client (reads ``BSC_RPC_URL``) that
-    queries transaction receipts and confirmation depth. Until one is wired, this
-    default fails closed: it reports an unconfirmed/failed receipt and zero
-    confirmations so NO swap can reconcile into a booked position. It never fakes
-    success. (``StaticRpcClient`` remains available as an explicit injectable port.)
-    """
-
-    def wallet_nonce(self) -> int:
-        return 0
-
-    def wait_receipt(self, tx_hash: str) -> dict:
-        return {"status": "0x0", "transactionHash": tx_hash}
-
-    def confirmations(self, receipt: dict) -> int:
-        return 0
 
 
 @dataclass
@@ -593,11 +574,15 @@ def build_app(
     if live_mode:
         live_twak = twak_runner or TwakRunner()
         wallet_address = os.environ.get("WALLET_ADDRESS", "")
-        # Fail-closed RPC default: a real BSC RPC client (reads BSC_RPC_URL) MUST be
-        # injected before the live canary. Until one is wired, _FailClosedLiveRpc
-        # reports an unconfirmed/failed receipt (status 0x0, 0 confirmations) so no
-        # swap can reconcile into a booked position — never a success-faking default.
-        rpc = live_rpc or _FailClosedLiveRpc()
+        # Live RPC default: the real BscRpcClient (reads BSC_RPC_URL, guaranteed
+        # present by _require_live_env). Construction is lazy (no connection), so the
+        # assemble path never makes a chain call. It fails closed at call time: a
+        # receipt timeout / RPC error RAISES, which the coordinator maps to a
+        # BROADCAST_UNKNOWN (exposure-blocking) outcome rather than fabricating a result.
+        rpc = live_rpc or BscRpcClient(
+            rpc_url=os.environ["BSC_RPC_URL"],
+            wallet_address=wallet_address,
+        )
         balances = live_balances or TwakBalanceReader(twak=live_twak)
         quote_provider = TwakQuoteProvider(
             twak=live_twak,
