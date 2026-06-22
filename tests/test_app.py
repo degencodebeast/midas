@@ -147,13 +147,14 @@ def test_paper_cycle_books_only_via_reconcile_path(tmp_path):
     assert app.position_manager.book[0].quantity > 0
 
 
-def test_paper_two_cycles_book_one_position_concurrency_cap_denies_second(tmp_path):
-    # An authorizing scanner + a single gold candidate so each cycle reaches
-    # execution; everything else is the real production wiring. With
-    # max_concurrent_positions == 1, booking ONE position must make the second
-    # cycle deny entry via concurrency_cap — never a second booking.
-    now1 = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
-    now2 = now1 + timedelta(minutes=5)
+def test_paper_cycles_book_up_to_concurrency_cap_then_deny_further(tmp_path):
+    # FIXED-MARGIN model: max_concurrent_positions == 3 (~15% max deployed at A-grade).
+    # An authorizing scanner + a single gold candidate so each cycle reaches execution;
+    # everything else is the real production wiring. Four authorized cycles must book
+    # exactly THREE positions; the fourth is denied by the concurrency cap (never a
+    # fourth booking).
+    base = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+    ticks = iter([base + timedelta(minutes=5 * i) for i in range(4)])
     setup = AuthorizedSetup.example()
     scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
     app = build_app(
@@ -163,18 +164,17 @@ def test_paper_two_cycles_book_one_position_concurrency_cap_denies_second(tmp_pa
         gold_candidate_symbol="ZEC",
     )
 
-    ticks = iter([now1, now2])
-    run_live(app, clock=lambda: next(ticks), max_iters=2)
+    run_live(app, clock=lambda: next(ticks), max_iters=4)
 
-    # Exactly ONE position booked across two authorized cycles: the second cycle
-    # is denied by the concurrency cap, not booked again.
-    assert len(app.position_manager.book) == 1
+    # Exactly THREE positions booked across four authorized cycles: the fourth is
+    # denied by the concurrency cap, not booked again.
+    assert len(app.position_manager.book) == 3
     confirmed = app.execution_coordinator.confirmed_records()
-    assert len(confirmed) == 1
-    # The open booked position is visible to the exit feed and the risk snapshot,
-    # so the concurrency cap can see it on the next cycle.
-    assert len(app.position_manager.positions()) == 1
-    assert app.state.risk_state().open_strategy_positions == 1
+    assert len(confirmed) == 3
+    # The open booked positions are visible to the exit feed and the risk snapshot,
+    # so the concurrency cap can see them and deny the fourth.
+    assert len(app.position_manager.positions()) == 3
+    assert app.state.risk_state().open_strategy_positions == 3
 
 
 def test_cmd_run_paper_completes_without_not_implemented(tmp_path):
@@ -492,15 +492,20 @@ def test_paper_booked_position_survives_restart_and_blocks_re_entry(tmp_path):
     # (entry 100 - structural_stop 90 == 10) so process_exits can order/manage it.
     assert restored.stressed_loss_per_unit == Decimal("10")
     # The exit feed and the risk snapshot both see the restored open position, so the
-    # concurrency cap is live on the next cycle.
+    # concurrency cap is live on the next cycle and counts the restored position.
     assert len(app2.position_manager.positions()) == 1
     assert app2.state.open_positions is not None
     assert app2.state.risk_state().open_strategy_positions == 1
 
-    # Second cycle after restart: the concurrency cap denies a SECOND booking.
-    run_live(app2, clock=_clock(now2), max_iters=1)
-    assert len(app2.position_manager.book) == 1
-    assert len(app2.execution_coordinator.confirmed_records()) == 0
+    # FIXED-MARGIN model: max_concurrent_positions == 3. The durable restore means the
+    # restored position counts toward the cap, so further cycles book up to the cap (3)
+    # and then DENY — the restored position is never silently re-entered past the cap.
+    base2 = now2
+    ticks = iter([base2 + timedelta(minutes=5 * i) for i in range(3)])
+    run_live(app2, clock=lambda: next(ticks), max_iters=3)
+    # Two more booked (total 3 = the cap); the third additional cycle is denied.
+    assert len(app2.position_manager.book) == 3
+    assert app2.state.risk_state().open_strategy_positions == 3
 
 
 def test_build_app_fails_closed_on_corrupt_positions_store(tmp_path):

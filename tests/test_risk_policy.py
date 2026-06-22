@@ -8,79 +8,316 @@ from magic_agent.runtime_state import RuntimeState
 from magic_agent.spot_models import ActionPurpose, AuthorizedSetup
 
 
-# Small-account live profile (~$20 equity / ~$10 deployable USDC) -------------------
-# These are the operator-facing proof that one trade deploys ~the full USDC (~$9.7)
-# and risks ~$0.50 at a ~5% stop, with the CASH cap (not the risk-fraction budget)
-# binding and every internal gate passing.
+# FIXED-MARGIN small-account live profile (~$20 equity / ~$10 deployable USDC) -------
+# These are the operator-facing proof that the position size is a fixed % of EQUITY
+# (the deployed notional), NOT derived from the scanner stop: an A-grade trade deploys
+# ~5% of equity (~$1.00) regardless of the stop distance, with the scanner stop used
+# only for risk tracking + the safety ceilings (actual risk = deploy x stop%, small).
 
 
-def test_small_account_five_percent_stop_deploys_full_usdc_and_risks_half_dollar():
-    # equity $20, deployable USDC $10. A-grade setup, entry 100, stop 95 (5% below).
-    state = RuntimeState.new_live_session(
+def _small_account_state():
+    return RuntimeState.new_live_session(
         equity_usd=Decimal("20"), cash_usd=Decimal("10"),
     ).risk_state()
-    setup = AuthorizedSetup.example(
-        grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
-        campaign_dol=Decimal("120"),
+
+
+def PortfolioRiskState_with(state, **changes):  # tiny helper for readable concurrency cases
+    return PortfolioRiskState(**{**state.__dict__, **changes})
+
+
+def test_a_grade_deploys_five_percent_of_equity_regardless_of_stop_distance():
+    # A-grade aligned, normal band. Deploy ~5% of $20 = ~$1.00 of NOTIONAL at BOTH a
+    # 5% stop AND a 12% stop -> proves MARGIN (not risk) sizes the position.
+    state = _small_account_state()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    config = RiskConfig.defaults()
+
+    tight = evaluate_risk(
+        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                campaign_dol=Decimal("120")),
+        state, config, ActionPurpose.STRATEGY, caps, market,
     )
+    wide = evaluate_risk(
+        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("88"),
+                                campaign_dol=Decimal("120")),
+        state, config, ActionPurpose.STRATEGY, caps, market,
+    )
+
+    assert tight.approved is True, tight.denied_by
+    assert wide.approved is True, wide.denied_by
+    tight_notional = tight.final_qty * Decimal("100")
+    wide_notional = wide.final_qty * Decimal("100")
+    # Both deploy ~$1.00 (5% of $20) — the stop distance does NOT change the size.
+    assert abs(tight_notional - Decimal("1.00")) < Decimal("0.01"), tight_notional
+    assert abs(wide_notional - Decimal("1.00")) < Decimal("0.01"), wide_notional
+    assert tight.final_qty == wide.final_qty
+    # final_qty = deploy_notional / entry.
+    assert tight.final_qty == Decimal("1.00") / Decimal("100")
+    # The margin binds (the deploy is the full base size; cash cap ~$9.70 doesn't bind).
+    assert tight.final_qty == tight.base_qty
+
+
+def test_risk_is_an_output_equal_to_deploy_times_stop_percent():
+    # $1 deploy with an 8% stop -> stressed_loss ~= $0.08; with a 12% stop -> ~$0.12.
+    state = _small_account_state()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    config = RiskConfig.defaults()
+
+    eight = evaluate_risk(
+        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("92"),
+                                campaign_dol=Decimal("120")),
+        state, config, ActionPurpose.STRATEGY, caps, market,
+    )
+    twelve = evaluate_risk(
+        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("88"),
+                                campaign_dol=Decimal("120")),
+        state, config, ActionPurpose.STRATEGY, caps, market,
+    )
+
+    risk_eight = eight.final_qty * (Decimal("100") - Decimal("92"))
+    risk_twelve = twelve.final_qty * (Decimal("100") - Decimal("88"))
+    assert abs(risk_eight - Decimal("0.08")) < Decimal("0.005"), risk_eight
+    assert abs(risk_twelve - Decimal("0.12")) < Decimal("0.005"), risk_twelve
+
+
+def test_b_grade_deploys_two_and_a_half_percent_of_equity():
+    state = _small_account_state()
     decision = evaluate_risk(
-        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
+        AuthorizedSetup.example(grade="B", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                campaign_dol=Decimal("120")),
+        state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
         QuantityCaps.unbounded(), MarketRiskContext.aligned(),
     )
-
     assert decision.approved is True, decision.denied_by
-    notional = decision.final_qty * setup.entry
-    risk = decision.final_qty * (setup.entry - setup.structural_stop)
-    # Cash-capped deploy: ($10 - $20*0.015 reserve) = $9.70 of token.
-    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
-    assert abs(risk - Decimal("0.485")) < Decimal("0.03"), risk
-    # The cash cap binds, NOT the 5% risk-fraction budget (which would be $20 notional).
-    assert decision.final_qty < decision.base_qty
+    notional = decision.final_qty * Decimal("100")
+    assert abs(notional - Decimal("0.50")) < Decimal("0.01"), notional  # 2.5% of $20
+    assert decision.risk_fraction == Decimal("0.025")
 
 
-def test_small_account_tighter_stop_is_still_cash_capped_at_full_usdc():
-    # With a TIGHTER 2% stop the risk-fraction budget sizes EVEN BIGGER, so the cash
-    # cap still binds at the same ~$9.7 deploy; only the risk drops (to ~$0.19).
-    state = RuntimeState.new_live_session(
-        equity_usd=Decimal("20"), cash_usd=Decimal("10"),
-    ).risk_state()
-    setup = AuthorizedSetup.example(
-        grade="A", entry=Decimal("100"), structural_stop=Decimal("98"),
-        campaign_dol=Decimal("120"),
-    )
+def test_counter_bias_halves_the_margin():
+    # A-grade counter-bias -> 5% * 0.5 = 2.5% of $20 = ~$0.50.
+    state = _small_account_state()
     decision = evaluate_risk(
-        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
-        QuantityCaps.unbounded(), MarketRiskContext.aligned(),
+        AuthorizedSetup.example(grade="A", bias_alignment="counter_bias",
+                                entry=Decimal("100"), structural_stop=Decimal("95"),
+                                campaign_dol=Decimal("120")),
+        state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
+        QuantityCaps.unbounded(), MarketRiskContext.counter_bias_qualified(),
     )
-
     assert decision.approved is True, decision.denied_by
-    notional = decision.final_qty * setup.entry
-    risk = decision.final_qty * (setup.entry - setup.structural_stop)
-    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
-    assert abs(risk - Decimal("0.194")) < Decimal("0.03"), risk
-    assert decision.final_qty < decision.base_qty
+    notional = decision.final_qty * Decimal("100")
+    assert abs(notional - Decimal("0.50")) < Decimal("0.01"), notional
+    assert decision.risk_fraction == Decimal("0.025")
 
 
-def test_small_account_canary_first_trade_also_deploys_full_usdc():
-    # The mandatory first live canary uses canary_risk_fraction (now 5%, == A-grade),
-    # so even the canary trade is cash-capped to ~$9.7 / ~$0.49 and passes every gate.
-    state = RuntimeState.new_live_session(
-        equity_usd=Decimal("20"), cash_usd=Decimal("10"),
-    ).risk_state()
-    setup = AuthorizedSetup.example(
-        grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
-        campaign_dol=Decimal("120"),
-    )
+def test_canary_first_trade_sizes_at_grade_margin():
+    # Under fixed-margin there is no scale-up: the canary sizes at the grade margin
+    # (canary_margin_fraction defaults to the A-grade 5%). Same ~$1.00 deploy.
+    state = _small_account_state()
     decision = evaluate_risk(
-        setup, state, RiskConfig.defaults(), ActionPurpose.STRATEGY,
-        QuantityCaps.unbounded(),
+        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                campaign_dol=Decimal("120")),
+        state, RiskConfig.defaults(), ActionPurpose.STRATEGY, QuantityCaps.unbounded(),
         MarketRiskContext(Decimal("0"), Decimal("1"), Decimal("1"), canary=True),
     )
-
     assert decision.approved is True, decision.denied_by
     assert decision.risk_fraction == Decimal("0.05")
-    notional = decision.final_qty * setup.entry
-    assert abs(notional - Decimal("9.70")) < Decimal("0.05"), notional
+    notional = decision.final_qty * Decimal("100")
+    assert abs(notional - Decimal("1.00")) < Decimal("0.01"), notional
+
+
+def test_three_a_grade_positions_deploy_fifteen_percent_and_fourth_is_denied():
+    # Max 3 concurrent -> max deployed ~3x5% = 15% of equity. The 4th concurrent
+    # A-grade must be DENIED by the concurrency cap.
+    state = _small_account_state()
+    config = RiskConfig.defaults()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    setup = AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                    campaign_dol=Decimal("120"))
+
+    per_trade_notional = Decimal("0")
+    for n in range(3):
+        d = evaluate_risk(setup, PortfolioRiskState_with(state, open_strategy_positions=n),
+                          config, ActionPurpose.STRATEGY, caps, market)
+        assert d.approved is True, (n, d.denied_by)
+        per_trade_notional = d.final_qty * Decimal("100")
+    total_deployed = per_trade_notional * 3
+    assert abs(total_deployed - (Decimal("20") * Decimal("0.15"))) < Decimal("0.03"), total_deployed
+
+    fourth = evaluate_risk(
+        setup, PortfolioRiskState_with(state, open_strategy_positions=3),
+        config, ActionPurpose.STRATEGY, caps, market,
+    )
+    assert fourth.approved is False
+    assert fourth.denied_by == "concurrency_cap"
+
+
+# Graduated drawdown ladder ----------------------------------------------------------
+
+
+def _dd_state(drawdown_pct, equity=Decimal("20"), cash=Decimal("10"), **changes):
+    # peak fixed at ``equity``; lower the live equity to realize the target drawdown.
+    peak = equity
+    live = peak * (Decimal("1") - drawdown_pct)
+    base = RuntimeState.new_live_session(equity_usd=peak, cash_usd=cash).risk_state()
+    return PortfolioRiskState(**{
+        **base.__dict__, "equity_usd": live, "peak_equity_usd": peak,
+        "daily_anchor_usd": live, **changes,
+    })
+
+
+def _a_setup():
+    return AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                   campaign_dol=Decimal("120"))
+
+
+def _b_setup():
+    return AuthorizedSetup.example(grade="B", entry=Decimal("100"), structural_stop=Decimal("95"),
+                                   campaign_dol=Decimal("120"))
+
+
+def test_throttle_band_halves_margin_and_caps_at_two_positions():
+    # 7% drawdown -> throttle band: A deploys ~2.5% (0.5x of 5%), max 2 positions.
+    config = RiskConfig.defaults()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    state = _dd_state(Decimal("0.07"))
+
+    d = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY, caps, market)
+    assert d.approved is True, d.denied_by
+    assert d.risk_fraction == Decimal("0.025")  # 5% * 0.5
+    notional = d.final_qty * Decimal("100")
+    assert abs(notional - state.equity_usd * Decimal("0.025")) < Decimal("0.01"), notional
+
+    # A 3rd concurrent position in the throttle band is denied (band max = 2).
+    third = evaluate_risk(_a_setup(), PortfolioRiskState_with(state, open_strategy_positions=2),
+                          config, ActionPurpose.STRATEGY, caps, market)
+    assert third.denied_by == "concurrency_cap"
+    # The 2nd is still allowed.
+    second = evaluate_risk(_a_setup(), PortfolioRiskState_with(state, open_strategy_positions=1),
+                           config, ActionPurpose.STRATEGY, caps, market)
+    assert second.approved is True, second.denied_by
+
+
+def test_defense_band_quarters_margin_is_a_only_and_caps_at_one_position():
+    # 12% drawdown -> defense band: A deploys ~1.25% (0.25x of 5%), B DENIED, max 1.
+    config = RiskConfig.defaults()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    state = _dd_state(Decimal("0.12"))
+
+    a = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY, caps, market)
+    assert a.approved is True, a.denied_by
+    assert a.risk_fraction == Decimal("0.0125")  # 5% * 0.25
+    notional = a.final_qty * Decimal("100")
+    assert abs(notional - state.equity_usd * Decimal("0.0125")) < Decimal("0.01"), notional
+
+    b = evaluate_risk(_b_setup(), state, config, ActionPurpose.STRATEGY, caps, market)
+    assert b.approved is False
+    assert b.denied_by == "drawdown_defense_a_only"
+
+    # A 2nd concurrent position in the defense band is denied (band max = 1).
+    second = evaluate_risk(_a_setup(), PortfolioRiskState_with(state, open_strategy_positions=1),
+                           config, ActionPurpose.STRATEGY, caps, market)
+    assert second.denied_by == "concurrency_cap"
+
+
+def test_entry_halt_band_denies_new_entries_at_sixteen_percent():
+    config = RiskConfig.defaults()
+    state = _dd_state(Decimal("0.16"))
+    d = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY,
+                      QuantityCaps.unbounded(), MarketRiskContext.aligned())
+    assert d.approved is False
+    assert d.denied_by == "drawdown_entry_halt"
+
+
+def test_hard_review_band_denies_new_entries_at_twenty_two_percent():
+    config = RiskConfig.defaults()
+    state = _dd_state(Decimal("0.22"))
+    d = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY,
+                      QuantityCaps.unbounded(), MarketRiskContext.aligned())
+    assert d.approved is False
+    assert d.denied_by == "drawdown_hard_review"
+
+
+def test_hard_dq_band_denies_new_entries_at_thirty_one_percent():
+    config = RiskConfig.defaults()
+    state = _dd_state(Decimal("0.31"))
+    d = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY,
+                      QuantityCaps.unbounded(), MarketRiskContext.aligned())
+    assert d.approved is False
+    assert d.denied_by == "hard_drawdown_dq"
+
+
+def test_five_percent_drawdown_is_a_throttle_not_a_halt():
+    # REGRESSION (supersedes d28f2f4): 5% drawdown no longer HALTS entries — it is the
+    # bottom of the THROTTLE band. An A-grade trade must still be APPROVED (de-rated).
+    config = RiskConfig.defaults()
+    state = _dd_state(Decimal("0.05"))
+    d = evaluate_risk(_a_setup(), state, config, ActionPurpose.STRATEGY,
+                      QuantityCaps.unbounded(), MarketRiskContext.aligned())
+    assert d.approved is True, d.denied_by
+    assert d.risk_fraction == Decimal("0.025")
+
+
+def test_protective_exits_still_run_while_entries_are_halted():
+    # At 16%+ drawdown new entries are HALTED, but the RISK_EXIT path must still
+    # approve (exit a reconciled position) and position_risk_reduction must still
+    # return a reduction — protective de-risking is never blocked by the entry halt.
+    config = RiskConfig.defaults()
+    state = _dd_state(Decimal("0.16"), open_stressed_loss_usd=Decimal("65"),
+                      reconciled_position=True)
+
+    exit_decision = evaluate_risk(
+        _a_setup(), state, config, ActionPurpose.RISK_EXIT,
+        QuantityCaps.unbounded(), MarketRiskContext.aligned(),
+    )
+    assert exit_decision.approved is True
+
+    # Drive a reduction: large equity/anchor so allowed = open_risk_room binds and the
+    # seeded open_stressed_loss exceeds it.
+    reduce_state = PortfolioRiskState(
+        equity_usd=Decimal("1000"), cash_usd=Decimal("1000"),
+        peak_equity_usd=Decimal("1200"),  # 16.7% drawdown -> entries halted
+        daily_anchor_usd=Decimal("1000"), open_stressed_loss_usd=Decimal("65"),
+    )
+    position = type("Position", (), {
+        "quantity": Decimal("2"), "stressed_loss_per_unit": Decimal("10"),
+    })()
+    reduction = position_risk_reduction(position, reduce_state, config)
+    assert reduction.reduction_qty > 0
+    assert reduction.reasons == ("open_or_daily_risk_exceeds_budget",)
+
+
+def test_wide_stop_still_trimmed_or_denied_by_open_risk_cap():
+    # The scanner stop is exit-only for SIZING, but a pathologically WIDE stop still
+    # pushes the stressed_loss high enough that open_risk_cap trims/denies. Use a large
+    # account so the margin deploy is meaningful and a ~40% stop dominates.
+    config = RiskConfig.defaults()
+    caps = QuantityCaps.unbounded()
+    market = MarketRiskContext.aligned()
+    # equity 1000: A-grade deploy = 5% = $50 notional = 0.5 qty at entry 100. With a
+    # 40% stop, stressed_loss = 0.5 * 40 = 20 < open_risk_cap (1000*0.06 = 60). Seed
+    # the open book near the ceiling so the wide-stop position tips it over.
+    state = PortfolioRiskState(
+        equity_usd=Decimal("1000"), cash_usd=Decimal("1000"),
+        peak_equity_usd=Decimal("1000"), daily_anchor_usd=Decimal("1000"),
+        open_stressed_loss_usd=Decimal("45"),
+    )
+    wide = AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("60"),
+                                   campaign_dol=Decimal("120"))
+    d = evaluate_risk(wide, state, config, ActionPurpose.STRATEGY, caps, market)
+    assert d.approved is False
+    assert d.denied_by == "open_risk_cap"
+
+    # A NARROW stop on the same state passes (same margin deploy, small stressed_loss).
+    narrow = AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("99"),
+                                     campaign_dol=Decimal("120"))
+    ok = evaluate_risk(narrow, state, config, ActionPurpose.STRATEGY, caps, market)
+    assert ok.approved is True, ok.denied_by
 
 
 def test_missing_config_denies_entry_but_allows_reconciled_exit():
@@ -91,18 +328,7 @@ def test_missing_config_denies_entry_but_allows_reconciled_exit():
     assert evaluate_risk(AuthorizedSetup.example(), state, None, ActionPurpose.RISK_EXIT, caps, market).approved
 
 
-def test_wider_stop_reduces_quantity_and_caps_never_increase_it():
-    state = PortfolioRiskState.example(equity_usd=Decimal("1000"))
-    config = RiskConfig.defaults()
-    caps = QuantityCaps.unbounded()
-    market = MarketRiskContext.aligned()
-    narrow = evaluate_risk(AuthorizedSetup.example(structural_stop=Decimal("95")), state, config, ActionPurpose.STRATEGY, caps, market)
-    wide = evaluate_risk(AuthorizedSetup.example(structural_stop=Decimal("80")), state, config, ActionPurpose.STRATEGY, caps, market)
-    assert narrow.final_qty > wide.final_qty
-    assert narrow.final_qty <= narrow.base_qty
-
-
-def test_grade_and_counter_bias_momentum_reduce_risk_without_tightening_stop():
+def test_grade_and_counter_bias_reduce_margin_not_via_stop():
     state = PortfolioRiskState.example(equity_usd=Decimal("1000"))
     config = RiskConfig.defaults()
     caps = QuantityCaps.unbounded()
@@ -112,6 +338,7 @@ def test_grade_and_counter_bias_momentum_reduce_risk_without_tightening_stop():
     assert aligned_a.risk_fraction == Decimal("0.05")
     assert counter_a.risk_fraction == Decimal("0.025")
     assert counter_b.risk_fraction == Decimal("0.0125")
+    # Same entry/stop, so half the margin -> half the quantity.
     assert counter_a.final_qty == aligned_a.final_qty / 2
 
 
@@ -126,7 +353,7 @@ def test_counter_bias_requires_positive_top_quartile_seven_day_momentum():
     assert decision.denied_by == "counter_bias_momentum"
 
 
-def test_real_scanner_counter_bias_promotion_reaches_half_risk(monkeypatch):
+def test_real_scanner_counter_bias_promotion_reaches_half_margin(monkeypatch):
     import pandas as pd
 
     import magic_scanner.authorization as scanner_auth
@@ -194,54 +421,40 @@ def test_real_scanner_counter_bias_promotion_reaches_half_risk(monkeypatch):
         QuantityCaps.unbounded(), MarketRiskContext.counter_bias_qualified(),
     )
     assert decision.approved
-    assert decision.risk_fraction == Decimal("0.0125")
+    assert decision.risk_fraction == Decimal("0.0125")  # B 2.5% * 0.5 counter-bias
 
 
-def test_drawdown_consecutive_stop_concurrency_and_stale_equity_gates():
+def test_consecutive_stop_concurrency_and_stale_equity_gates():
     setup = AuthorizedSetup.example()
     config = RiskConfig.defaults()
     caps = QuantityCaps.unbounded()
     market = MarketRiskContext.aligned()
-    assert evaluate_risk(setup, PortfolioRiskState.example(equity_usd=Decimal("950")), config, ActionPurpose.STRATEGY, caps, market).denied_by == "drawdown_entry_halt"
     assert evaluate_risk(setup, PortfolioRiskState.example(consecutive_stops=3), config, ActionPurpose.STRATEGY, caps, market).denied_by == "consecutive_stop_halt"
-    assert evaluate_risk(setup, PortfolioRiskState.example(open_strategy_positions=1), config, ActionPurpose.STRATEGY, caps, market).denied_by == "concurrency_cap"
+    # Normal band: concurrency cap is the configured max (3).
+    assert evaluate_risk(setup, PortfolioRiskState.example(open_strategy_positions=3), config, ActionPurpose.STRATEGY, caps, market).denied_by == "concurrency_cap"
+    assert evaluate_risk(setup, PortfolioRiskState.example(open_strategy_positions=2), config, ActionPurpose.STRATEGY, caps, market).approved is True
     assert evaluate_risk(setup, PortfolioRiskState.example(equity_fresh=False), config, ActionPurpose.STRATEGY, caps, market).denied_by == "stale_equity"
 
 
-def test_confirmed_thirty_percent_drawdown_is_an_explicit_hard_dq_guard():
-    decision = evaluate_risk(
-        AuthorizedSetup.example(), PortfolioRiskState.example(equity_usd=Decimal("700")),
-        RiskConfig.defaults(), ActionPurpose.STRATEGY, QuantityCaps.unbounded(),
-        MarketRiskContext.aligned(),
-    )
-    assert not decision.approved
-    assert decision.denied_by == "hard_drawdown_dq"
-
-
-def test_three_percent_drawdown_throttles_and_correlation_bucket_caps_all_longs():
+def test_correlation_bucket_caps_all_longs():
     config = RiskConfig.defaults()
     caps = QuantityCaps.unbounded()
     market = MarketRiskContext.aligned()
-    normal = evaluate_risk(AuthorizedSetup.example(), PortfolioRiskState.example(), config, ActionPurpose.STRATEGY, caps, market)
-    throttled = evaluate_risk(AuthorizedSetup.example(), PortfolioRiskState.example(equity_usd=Decimal("970"), daily_anchor_usd=Decimal("970")), config, ActionPurpose.STRATEGY, caps, market)
-    assert throttled.risk_fraction == normal.risk_fraction * Decimal("0.50")
-    # New small-account caps: bucket cap = equity(1000)*max_correlation_bucket_risk(0.06)
-    # = 60. Default B-grade sizing here is base=2.5 qty -> new_stressed_loss=25 (well
-    # under the open_risk_cap of 60 with open_stressed_loss=0, so that gate passes
-    # first). Seed the correlation bucket at 40 so projected_bucket = 40 + 25 = 65 > 60
-    # and ONLY the correlation_bucket_cap fires.
+    # equity 1000, A-grade deploy 5% = $50 = 0.5 qty at entry 100; default example stop
+    # is entry 100 - stop 90 = 10/unit -> new_stressed_loss = 0.5*10 = 5. open_risk_cap
+    # = 1000*0.06 = 60 (passes with open=0). Seed the bucket at 58 so projected_bucket
+    # = 58 + 5 = 63 > 60 and ONLY the correlation_bucket_cap fires.
     bucket_full = evaluate_risk(
-        AuthorizedSetup.example(),
-        PortfolioRiskState.example(correlation_bucket_stressed_loss_usd=Decimal("40")),
+        AuthorizedSetup.example(grade="A"),
+        PortfolioRiskState.example(correlation_bucket_stressed_loss_usd=Decimal("58")),
         config, ActionPurpose.STRATEGY, caps, market,
     )
     assert bucket_full.denied_by == "correlation_bucket_cap"
 
 
 def test_position_risk_reduction_returns_quantity_needed_to_restore_budget():
-    # New caps: daily_room = 1000*daily_loss_fraction(0.10) = 100; open_risk_room =
-    # 1000*max_open_risk(0.06) = 60; allowed = min = 60. Seed open_stressed_loss at 65
-    # so excess = 65 - 60 = 5 and reduce_qty = min(qty 2, 5/10) = 0.5.
+    # daily_room = 1000*0.10 = 100; open_risk_room = 1000*0.06 = 60; allowed = 60.
+    # open_stressed_loss 65 -> excess = 5 -> reduce_qty = min(2, 5/10) = 0.5.
     state = PortfolioRiskState.example(
         equity_usd=Decimal("1000"), daily_anchor_usd=Decimal("1000"),
         open_stressed_loss_usd=Decimal("65"),
@@ -254,37 +467,21 @@ def test_position_risk_reduction_returns_quantity_needed_to_restore_budget():
     assert decision.reasons == ("open_or_daily_risk_exceeds_budget",)
 
 
-# REQ-044 deny-path regression locks ------------------------------------------------
+# Deny-path regression locks --------------------------------------------------------
 # Each test isolates exactly one gate so no adjacent gate can mask the target denial.
 
 
-def test_req044_drawdown_emergency_review_at_eight_percent_ladder_rung():
-    # equity=920 → drawdown=8% ≥ drawdown_review(0.08); below hard_drawdown_dq(0.30).
-    # drawdown_entry_halt(0.05) would fire at 5%, but the review rung is checked AFTER
-    # hard_drawdown_dq and BEFORE drawdown_entry_halt — drawdown=0.08 trips review first.
+def test_open_risk_cap_isolated_from_correlation_bucket_cap():
+    # open_risk_cap is checked BEFORE correlation_bucket_cap. A-grade deploy 5% of 1000
+    # = $50 = 0.5 qty; example stop 100->90 = 10/unit -> new_stressed_loss = 5.
+    # correlation_bucket=0 keeps the bucket within cap; open_stressed_loss 56 + 5 = 61
+    # > equity*max_open_risk (1000*0.06 = 60) -> open_risk_cap fires alone.
     decision = evaluate_risk(
-        AuthorizedSetup.example(),
-        PortfolioRiskState.example(equity_usd=Decimal("920")),
-        RiskConfig.defaults(), ActionPurpose.STRATEGY,
-        QuantityCaps.unbounded(), MarketRiskContext.aligned(),
-    )
-    assert decision.approved is False
-    assert decision.denied_by == "drawdown_emergency_review"
-
-
-def test_req044_open_risk_cap_isolated_from_correlation_bucket_cap():
-    # open_risk_cap is checked BEFORE correlation_bucket_cap (lines 184 vs 187 in source).
-    # correlation_bucket_stressed_loss_usd=0 keeps projected_bucket=new_stressed_loss well
-    # within the bucket cap (5 < 60), so open_risk_cap fires alone on the portfolio total.
-    # A-grade sizing here is token-capped to 5 qty (token_cap = 1000*0.5/100), so
-    # new_stressed_loss = 5*1 = 5. open_stressed_loss_usd=56 + 5 = 61 > equity*max_open_risk
-    # (1000*0.06 = 60).
-    decision = evaluate_risk(
-        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("99")),
+        AuthorizedSetup.example(grade="A"),
         PortfolioRiskState.example(
             equity_usd=Decimal("1000"),
             open_stressed_loss_usd=Decimal("56"),
-            correlation_bucket_stressed_loss_usd=Decimal("0"),  # isolates from bucket cap
+            correlation_bucket_stressed_loss_usd=Decimal("0"),
         ),
         RiskConfig.defaults(), ActionPurpose.STRATEGY,
         QuantityCaps.unbounded(), MarketRiskContext.aligned(),
@@ -293,16 +490,15 @@ def test_req044_open_risk_cap_isolated_from_correlation_bucket_cap():
     assert decision.denied_by == "open_risk_cap"
 
 
-def test_req044_daily_loss_cap_denies_when_existing_loss_plus_new_exposure_exceeds_fraction():
-    # New daily_loss_fraction is 0.10. Drive a large existing intraday loss WITHOUT
-    # tripping the drawdown gates (which key off peak=1000, so equity=985 is only a 1.5%
-    # drawdown). daily_anchor=1100, equity=985 -> daily_loss=115. A-grade is token-capped
-    # to 5 qty -> new stressed_loss=5; projected total=5 (open_stressed_loss=0) stays
-    # under open_risk_cap (985*0.06=59.1) and correlation_bucket_cap so neither fires
-    # first. daily_loss(115) + projected(5) = 120 > daily_anchor*daily_loss_fraction
-    # (1100*0.10 = 110) -> daily_loss_cap.
+def test_daily_loss_cap_denies_when_existing_loss_plus_new_exposure_exceeds_fraction():
+    # daily_loss_fraction 0.10. Drive a large intraday loss WITHOUT tripping the
+    # drawdown gates (peak=1000, equity=985 -> 1.5% drawdown = normal band).
+    # daily_anchor=1100, equity=985 -> daily_loss=115. A-grade deploy 5% of 985 =
+    # $49.25 = 0.4925 qty; example stop 10/unit -> stressed_loss ~= 4.925; total ~= 4.925
+    # (open=0) under open_risk_cap (985*0.06=59.1). daily_loss(115)+projected(~4.9) ~= 120
+    # > daily_anchor*0.10 (110) -> daily_loss_cap.
     decision = evaluate_risk(
-        AuthorizedSetup.example(grade="A", entry=Decimal("100"), structural_stop=Decimal("99")),
+        AuthorizedSetup.example(grade="A"),
         PortfolioRiskState.example(
             equity_usd=Decimal("985"),
             daily_anchor_usd=Decimal("1100"),
@@ -316,10 +512,7 @@ def test_req044_daily_loss_cap_denies_when_existing_loss_plus_new_exposure_excee
     assert decision.denied_by == "daily_loss_cap"
 
 
-def test_req044_unsupported_grade_outside_a_b_family_is_denied():
-    # Grade "C" does not start with "A" or "B"; the policy has no promotion path for it.
-    # All gates before the grade branch (drawdown, stops, concurrency) are bypassed by
-    # using a clean PortfolioRiskState.example() with no adverse values.
+def test_unsupported_grade_outside_a_b_family_is_denied():
     decision = evaluate_risk(
         AuthorizedSetup.example(grade="C"),
         PortfolioRiskState.example(), RiskConfig.defaults(), ActionPurpose.STRATEGY,
@@ -329,27 +522,11 @@ def test_req044_unsupported_grade_outside_a_b_family_is_denied():
     assert decision.denied_by == "unsupported_grade"
 
 
-def test_req044_geometry_nonpositive_loss_when_stop_equals_entry():
-    # structural_stop=entry → loss_per_unit=0 → nonpositive_loss geometry denial.
-    # AuthorizedSetup.__post_init__ requires stop < entry < campaign_dol, so we set
-    # structural_stop just below entry (0.01 gap) then override to equal via example()
-    # which bypasses the guard — but example() internally uses replace() which re-runs
-    # __post_init__.  Use entry=100, structural_stop=99.99 then test stop >= entry by
-    # setting structural_stop=100.01 is also invalid.  Correct approach: use a stop of
-    # 99 and entry 99 is forbidden.  Instead use entry=100, structural_stop=99.99 gives
-    # loss=0.01 > 0, which passes.  To get nonpositive we need stop=entry: construct
-    # manually with a mock that bypasses validation, or use the dict-based approach.
-    # Simplest: use object() trick identical to the position mock pattern already in this
-    # file — bypass dataclass __post_init__ via object.__setattr__ on a new frozen copy.
-    # Actually, AuthorizedSetup.example() calls replace() which triggers __post_init__.
-    # We exploit that entry=100 and structural_stop=100 would fail __post_init__.
-    # Instead: pass entry=Decimal("100"), structural_stop=Decimal("100") via a plain
-    # object that duck-types AuthorizedSetup (evaluate_risk accesses .grade, .entry,
-    # .structural_stop, .bias_alignment only).
+def test_geometry_nonpositive_loss_when_stop_equals_entry():
     class _FakeSetup:
         grade = "A"
         entry = Decimal("100")
-        structural_stop = Decimal("100")  # loss_per_unit = 0 → nonpositive_loss
+        structural_stop = Decimal("100")  # loss_per_unit = 0 -> nonpositive_loss
         bias_alignment = "aligned"
 
     decision = evaluate_risk(
@@ -362,19 +539,16 @@ def test_req044_geometry_nonpositive_loss_when_stop_equals_entry():
     assert "nonpositive_loss" in decision.reasons
 
 
-def test_req044_below_minimum_notional_returns_zero_quantity():
-    # QuantityCaps.minimum_notional_usd set so high that even the full base_qty * entry
-    # falls short.  No other cap fires: liquidity/pool/concentration/gap are Infinity.
-    # All prior gates (drawdown, stops, concurrency, grade) pass with default example state.
+def test_below_minimum_notional_returns_zero_quantity():
     caps = QuantityCaps(
         liquidity_qty=Decimal("Infinity"),
         pool_share_qty=Decimal("Infinity"),
         concentration_qty=Decimal("Infinity"),
         gap_stress_qty=Decimal("Infinity"),
-        minimum_notional_usd=Decimal("9999"),  # capped notional (~$250) << 9999
+        minimum_notional_usd=Decimal("9999"),  # capped notional ($50) << 9999
     )
     decision = evaluate_risk(
-        AuthorizedSetup.example(),
+        AuthorizedSetup.example(grade="A"),
         PortfolioRiskState.example(), RiskConfig.defaults(), ActionPurpose.STRATEGY,
         caps, MarketRiskContext.aligned(),
     )
@@ -382,11 +556,7 @@ def test_req044_below_minimum_notional_returns_zero_quantity():
     assert decision.denied_by == "below_minimum_notional"
 
 
-def test_req044_zero_safe_quantity_when_macro_clamp_zeros_out_sized_quantity():
-    # macro_clamp=0 collapses a positive capped qty to 0 after apply_quantity_caps.
-    # cap_reason=None (minimum_notional=0, caps unbounded), so the zero_safe_quantity
-    # branch fires.  This is distinct from below_minimum_notional: the cap routine
-    # returns a positive qty but the macro_clamp multiplication zeroes it.
+def test_zero_safe_quantity_when_macro_clamp_zeros_out_sized_quantity():
     market = MarketRiskContext(
         momentum_7d=Decimal("0"),
         momentum_7d_rank_pct=Decimal("1"),
@@ -402,10 +572,7 @@ def test_req044_zero_safe_quantity_when_macro_clamp_zeros_out_sized_quantity():
     assert decision.denied_by == "zero_safe_quantity"
 
 
-def test_req044_risk_exit_denied_when_position_not_reconciled():
-    # RISK_EXIT branch is entered before any grade/drawdown gate when config is present.
-    # reconciled_position=False → "unreconciled" denial proves exit is fail-closed when
-    # the position record has not been confirmed — complements the existing exit-allowed test.
+def test_risk_exit_denied_when_position_not_reconciled():
     decision = evaluate_risk(
         AuthorizedSetup.example(),
         PortfolioRiskState.example(reconciled_position=False),
@@ -416,11 +583,7 @@ def test_req044_risk_exit_denied_when_position_not_reconciled():
     assert decision.denied_by == "unreconciled"
 
 
-def test_req044_missing_policy_denies_strategy_and_reduction_failsafe_returns_full_qty():
-    # config=None + STRATEGY → "missing_policy" (fail-closed, no approval).
-    # Distinct from the existing test which only checks STRATEGY denied + EXIT allowed;
-    # this additionally pins the denied_by string and exercises position_risk_reduction
-    # fail-safe: config=None must return the full position qty with "missing_policy_reduce_only".
+def test_missing_policy_denies_strategy_and_reduction_failsafe_returns_full_qty():
     state = PortfolioRiskState.example(reconciled_position=False)
     entry_denial = evaluate_risk(
         AuthorizedSetup.example(), state, None, ActionPurpose.STRATEGY,
@@ -437,12 +600,7 @@ def test_req044_missing_policy_denies_strategy_and_reduction_failsafe_returns_fu
     assert "missing_policy_reduce_only" in reduction.reasons
 
 
-def test_req044_position_risk_reduction_invalid_stress_returns_full_qty_as_failsafe():
-    # stressed_loss_per_unit <= 0 with config present → "invalid_position_stress_reduce_only".
-    # This covers the second fail-safe branch in position_risk_reduction (line 207 in source).
-    # New caps: allowed = min(daily_room 100, open_risk_room 60) = 60. open_stressed_loss_usd=65
-    # > 60 so excess > 0 (enters the branch), then stressed_loss_per_unit=0 triggers the guard
-    # before division occurs.
+def test_position_risk_reduction_invalid_stress_returns_full_qty_as_failsafe():
     state = PortfolioRiskState.example(
         equity_usd=Decimal("1000"), daily_anchor_usd=Decimal("1000"),
         open_stressed_loss_usd=Decimal("65"),

@@ -8,11 +8,16 @@ from magic_agent.spot_models import ActionPurpose, AuthorizedSetup
 
 @dataclass(frozen=True)
 class RiskConfig:
-    canary_risk_fraction: Decimal
-    a_grade_risk_fraction: Decimal
-    b_grade_risk_fraction: Decimal
+    # FIXED-MARGIN sizing. The position is a fixed % of EQUITY (the deployed
+    # notional), NOT derived from the stop. ``a_grade_margin_fraction`` /
+    # ``b_grade_margin_fraction`` are the per-trade deploy-% of equity; the scanner
+    # stop is exit geometry only (used for risk TRACKING + the safety ceilings, never
+    # to size the position). Actual per-trade risk = deploy_notional * stop_distance%
+    # — an OUTPUT, small.
+    canary_margin_fraction: Decimal
+    a_grade_margin_fraction: Decimal
+    b_grade_margin_fraction: Decimal
     counter_bias_multiplier: Decimal
-    drawdown_throttle_multiplier: Decimal
     max_open_risk: Decimal
     max_correlation_bucket_risk: Decimal
     max_concurrent_positions: int
@@ -21,42 +26,85 @@ class RiskConfig:
     stable_reserve_fraction: Decimal
     daily_loss_fraction: Decimal
     consecutive_stop_halt: int
+    # ---- Graduated drawdown ladder (highest band first) -------------------------
+    # drawdown = (peak_equity - equity)/peak_equity. Applied in order:
+    #   >= hard_drawdown_dq        -> DENY hard_drawdown_dq
+    #   >= drawdown_hard_review    -> DENY drawdown_hard_review (no new entries)
+    #   >= drawdown_entry_halt     -> DENY drawdown_entry_halt (halt new entries)
+    #   >= drawdown_defense        -> DEFENSE: margin x defense mult, A-grade only,
+    #                                 max ``drawdown_defense_max_positions``
+    #   >= drawdown_throttle       -> THROTTLE: margin x throttle mult, A+B,
+    #                                 max ``drawdown_throttle_max_positions``
+    #   <  drawdown_throttle       -> NORMAL: margin x1, A+B, full concurrency
+    # Protective EXITS still run while new entries are halted (the RISK_EXIT path and
+    # position_risk_reduction are not gated by these bands).
     drawdown_throttle: Decimal
+    drawdown_defense: Decimal
     drawdown_entry_halt: Decimal
-    drawdown_review: Decimal
+    drawdown_hard_review: Decimal
     hard_drawdown_dq: Decimal
+    drawdown_throttle_multiplier: Decimal
+    drawdown_defense_multiplier: Decimal
+    drawdown_throttle_max_positions: int
+    drawdown_defense_max_positions: int
 
     def __post_init__(self) -> None:
-        if self.max_concurrent_positions > self.hard_max_concurrent_positions or self.hard_max_concurrent_positions > 2:
-            raise ValueError("concurrent strategy positions exceed the Track 1 hard maximum")
-        if not (self.drawdown_throttle < self.drawdown_entry_halt < self.drawdown_review < self.hard_drawdown_dq):
-            raise ValueError("drawdown thresholds must be strictly ordered")
+        if self.max_concurrent_positions > self.hard_max_concurrent_positions:
+            raise ValueError("concurrent strategy positions exceed the hard maximum")
+        if self.hard_max_concurrent_positions < 3:
+            raise ValueError("Track 1 fixed-margin model requires >=3 concurrent slots")
+        if not (
+            self.drawdown_throttle
+            < self.drawdown_defense
+            < self.drawdown_entry_halt
+            < self.drawdown_hard_review
+            < self.hard_drawdown_dq
+        ):
+            raise ValueError("drawdown ladder thresholds must be strictly ordered")
 
     @classmethod
     def defaults(cls) -> "RiskConfig":
-        # Small-account profile for the ~$20 live competition wallet (~$10 deployable
-        # USDC). The operator wants each trade to deploy ~the full USDC (~$9.7) and
-        # risk ~$0.50 at a ~5% stop, so the CASH cap (not the risk-fraction budget)
-        # must bind. Each knob below is reconciled for that coherent outcome:
-        #   * risk fractions raised to ~5% (canary + A; B half of A) so budget/stop
-        #     sizing (e.g. 0.05*$20/5 = 0.2 qty = $20 notional) OVERSHOOTS the cash
-        #     cap and is clamped down to it rather than capping risk below the cash.
-        #   * stable_reserve_fraction dropped to a SMALL 1.5% (~$0.30 of $20) so the
-        #     cash cap = ($10 - $0.30)/entry deploys ~$9.7, not the large-account
-        #     30% (~$6) reserve that would clamp the deploy to ~$4.
-        #   * max_token_fraction 0.5 lets a ~$10 = 50%-of-equity single-token position
-        #     through (0.25 would cap it at $5).
-        #   * max_open_risk / max_correlation_bucket_risk raised to 6% so a single
-        #     ~$0.49-risk position (~2.4% of $20) is not blocked (headroom for one).
-        #   * daily_loss_fraction 10% so a couple of ~$0.50 losses don't halt after one
-        #     (1.5% of $20 = $0.30 would halt after the first stop-out).
-        # Core safety KEPT: 30% hard-DQ, single concurrent position, a (small) stable
-        # reserve, and the consecutive-stop halt (kept at 3).
+        # FIXED-MARGIN small-account profile for the ~$20 live competition wallet
+        # (~$10 deployable USDC). Each trade deploys a fixed % of EQUITY:
+        #   * A-grade aligned -> 5% of equity (on $20 => ~$1.00) REGARDLESS of the
+        #     scanner stop distance. B-grade -> 2.5% (=> ~$0.50). Counter-bias keeps
+        #     the 0.5x multiplier (applied to the margin %).
+        #   * The scanner stop NO LONGER sizes the position; it is exit geometry only,
+        #     used for risk tracking + the safety ceilings (open_risk_cap /
+        #     correlation_bucket_cap / daily_loss_cap), so a pathologically WIDE stop
+        #     can still TRIM/deny via open_risk_cap.
+        #   * max_concurrent_positions = 3 -> max deployed ~3x5% = 15% of equity
+        #     (A-only); enforced naturally by concurrency x margin (no separate cap).
+        #   * cash_cap (don't deploy more USDC than held, minus a small stable
+        #     reserve), token_cap, and macro_clamp are KEPT. At ~$1 deploy the cash
+        #     cap (~$9.70 of USDC) no longer binds — the margin binds.
+        #   * Graduated drawdown ladder REPLACES the old hard-5%-halt: <5% normal,
+        #     5-10% throttle (0.5x, max 2 positions, A+B), 10-15% defense (0.25x,
+        #     max 1, A-only), 15-20% halt new entries, 20-30% hard review, >=30% DQ.
+        # Core safety KEPT: 30% hard-DQ, a (small) stable reserve, and the
+        # consecutive-stop halt (kept at 3).
         return cls(
-            Decimal("0.05"), Decimal("0.05"), Decimal("0.025"), Decimal("0.50"),
-            Decimal("0.50"), Decimal("0.06"), Decimal("0.06"), 1, 2,
-            Decimal("0.50"), Decimal("0.015"), Decimal("0.10"), 3,
-            Decimal("0.03"), Decimal("0.05"), Decimal("0.08"), Decimal("0.30"),
+            canary_margin_fraction=Decimal("0.05"),
+            a_grade_margin_fraction=Decimal("0.05"),
+            b_grade_margin_fraction=Decimal("0.025"),
+            counter_bias_multiplier=Decimal("0.50"),
+            max_open_risk=Decimal("0.06"),
+            max_correlation_bucket_risk=Decimal("0.06"),
+            max_concurrent_positions=3,
+            hard_max_concurrent_positions=3,
+            max_token_fraction=Decimal("0.50"),
+            stable_reserve_fraction=Decimal("0.015"),
+            daily_loss_fraction=Decimal("0.10"),
+            consecutive_stop_halt=3,
+            drawdown_throttle=Decimal("0.05"),
+            drawdown_defense=Decimal("0.10"),
+            drawdown_entry_halt=Decimal("0.15"),
+            drawdown_hard_review=Decimal("0.20"),
+            hard_drawdown_dq=Decimal("0.30"),
+            drawdown_throttle_multiplier=Decimal("0.50"),
+            drawdown_defense_multiplier=Decimal("0.25"),
+            drawdown_throttle_max_positions=2,
+            drawdown_defense_max_positions=1,
         )
 
     def stable_hash(self) -> str:
@@ -87,7 +135,11 @@ class RiskDecision:
     approved: bool
     denied_by: str | None
     reasons: tuple[str, ...]
+    # ``risk_fraction`` now carries the effective MARGIN fraction (deploy-% of equity)
+    # after grade / counter-bias / drawdown-band multipliers. The field name is
+    # retained for the downstream narrative + cost-viability passthrough.
     risk_fraction: Decimal
+    # ``risk_budget_usd`` now carries the deploy NOTIONAL (equity * margin fraction).
     risk_budget_usd: Decimal
     base_qty: Decimal
     final_qty: Decimal
@@ -154,42 +206,65 @@ def evaluate_risk(setup: AuthorizedSetup, state: PortfolioRiskState,
         return RiskDecision(state.reconciled_position, None if state.reconciled_position else "unreconciled", (), zero, zero, zero, zero)
     if not state.equity_fresh:
         return deny("stale_equity")
+
+    # ---- Graduated drawdown ladder (highest band first) -------------------------
     drawdown = max(zero, (state.peak_equity_usd - state.equity_usd) / state.peak_equity_usd)
     if drawdown >= config.hard_drawdown_dq:
         return deny("hard_drawdown_dq")
-    if drawdown >= config.drawdown_review:
-        return deny("drawdown_emergency_review")
+    if drawdown >= config.drawdown_hard_review:
+        return deny("drawdown_hard_review")
     if drawdown >= config.drawdown_entry_halt:
         return deny("drawdown_entry_halt")
+
+    # De-rating bands: defense (A-only, 0.25x, max 1) and throttle (A+B, 0.5x, max 2).
+    band_margin_mult = Decimal("1")
+    band_max_positions = config.max_concurrent_positions
+    in_defense_band = drawdown >= config.drawdown_defense
+    if in_defense_band:
+        band_margin_mult = config.drawdown_defense_multiplier
+        band_max_positions = config.drawdown_defense_max_positions
+    elif drawdown >= config.drawdown_throttle:
+        band_margin_mult = config.drawdown_throttle_multiplier
+        band_max_positions = config.drawdown_throttle_max_positions
+
     if state.consecutive_stops >= config.consecutive_stop_halt:
         return deny("consecutive_stop_halt")
-    if state.open_strategy_positions >= config.max_concurrent_positions:
+    # The per-band max-positions OVERRIDES the normal concurrency cap when in-band.
+    if state.open_strategy_positions >= band_max_positions:
         return deny("concurrency_cap")
+
     if setup.grade.startswith("A"):
-        risk_fraction = config.a_grade_risk_fraction
+        margin_fraction = config.a_grade_margin_fraction
     elif setup.grade.startswith("B"):
-        risk_fraction = config.b_grade_risk_fraction
+        if in_defense_band:
+            return deny("drawdown_defense_a_only")
+        margin_fraction = config.b_grade_margin_fraction
     else:
         return deny("unsupported_grade")
     if market.canary:
-        risk_fraction = min(risk_fraction, config.canary_risk_fraction)
+        margin_fraction = min(margin_fraction, config.canary_margin_fraction)
     if setup.bias_alignment == "counter_bias":
         if market.momentum_7d <= 0 or market.momentum_7d_rank_pct > Decimal("0.25"):
             return deny("counter_bias_momentum", "counter_bias_requires_positive_top_quartile_7d")
-        risk_fraction *= config.counter_bias_multiplier
-    if drawdown >= config.drawdown_throttle:
-        risk_fraction *= config.drawdown_throttle_multiplier
+        margin_fraction *= config.counter_bias_multiplier
+    margin_fraction *= band_margin_mult
+
+    # ---- FIXED-MARGIN sizing: deploy a fixed % of EQUITY as notional. -----------
+    # The scanner stop (loss_per_unit) is exit geometry only — it no longer sizes the
+    # position. It IS used below for risk tracking + the safety ceilings.
     loss_per_unit = setup.entry - setup.structural_stop
     if loss_per_unit <= 0:
         return deny("geometry", "nonpositive_loss")
-    budget = state.equity_usd * risk_fraction
-    base = budget / loss_per_unit
+    deploy_notional = state.equity_usd * margin_fraction
+    base = deploy_notional / setup.entry
     cash_cap = max(Decimal("0"), state.cash_usd - state.equity_usd * config.stable_reserve_fraction) / setup.entry
     token_cap = state.equity_usd * config.max_token_fraction / setup.entry
     capped, cap_reason = apply_quantity_caps(
         base_qty=min(base, cash_cap, token_cap), entry=setup.entry, caps=caps,
     )
     final = capped * market.macro_clamp
+    # Risk TRACKING + safety ceilings use the stop. A wide stop -> high stressed_loss
+    # -> open_risk_cap / correlation_bucket_cap / daily_loss_cap can still TRIM or deny.
     new_stressed_loss = final * loss_per_unit
     projected = state.open_stressed_loss_usd + new_stressed_loss
     projected_bucket = state.correlation_bucket_stressed_loss_usd + new_stressed_loss
@@ -205,7 +280,7 @@ def evaluate_risk(setup: AuthorizedSetup, state: PortfolioRiskState,
         return deny("correlation_bucket_cap")
     if not within_daily:
         return deny("daily_loss_cap")
-    return RiskDecision(True, None, (), risk_fraction, budget, base, final)
+    return RiskDecision(True, None, (), margin_fraction, deploy_notional, base, final)
 
 
 def position_risk_reduction(position, state: PortfolioRiskState,
