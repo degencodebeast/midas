@@ -75,7 +75,7 @@ docker run --rm -e GITHUB_TOKEN="$TOKEN" -v "$REPO_DIR":/src:ro "$IMAGE" bash -e
   uv run magic-agent run --executor paper --max-iters 1
 
   echo "=== TWAK CLI on Node 24 (distro Node 18 crashes the CLI with ERR_REQUIRE_ESM) ==="
-  # @trustwallet/cli require()s an ESM module. That throws ERR_REQUIRE_ESM on Debian's
+  # @trustwallet/cli require()s an ESM module. That throws ERR_REQUIRE_ESM on the Debian
   # default Node 18, but WORKS on Node >=20.19 (require(esm) was backported there) and on
   # Node 22/24. We install Node 24 to match the tested local setup (twak 0.19.1). The VPS
   # MUST install Node >=20.19 too — never rely on the distro `apt install nodejs` (=18).
