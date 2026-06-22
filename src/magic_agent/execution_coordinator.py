@@ -17,11 +17,14 @@ intent raises before any swap is submitted, so the coordinator never
 double-submits or double-books.
 """
 
+import logging
 from dataclasses import asdict
 
 from magic_agent.execution_journal import ExecutionState
 from magic_agent.reconcile import reconcile_buy
 from magic_agent.twak import TwakError
+
+_log = logging.getLogger(__name__)
 
 
 class ExecutionCoordinator:
@@ -58,6 +61,7 @@ class ExecutionCoordinator:
             if not tx_hash:
                 raise TwakError("swap response missing transaction hash")
         except Exception as exc:
+            _log.warning("swap broadcast outcome unknown: %s", exc)
             self.journal.transition(
                 intent.intent_id, ExecutionState.BROADCAST_UNKNOWN, error=str(exc),
             )
@@ -70,6 +74,7 @@ class ExecutionCoordinator:
         try:
             receipt = self.rpc.wait_receipt(tx_hash)
         except Exception as exc:
+            _log.warning("receipt wait failed; broadcast outcome unknown: %s", exc)
             self.journal.transition(
                 intent.intent_id, ExecutionState.BROADCAST_UNKNOWN, error=str(exc),
             )
@@ -90,6 +95,7 @@ class ExecutionCoordinator:
                 token_before=pre["token"], token_after=post["token"],
             )
         except Exception:
+            _log.exception("post-MINED reconcile read failed; returning MINED (fail closed)")
             return "MINED"
         if result.state != "RECONCILED":
             return result.state

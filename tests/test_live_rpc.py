@@ -108,6 +108,24 @@ def test_confirmations_zero_when_no_block_number():
     assert calls == []
 
 
+def test_confirmations_raises_on_malformed_block_number():
+    # eth_blockNumber returns a non-hex head: confirmations must RAISE rather
+    # than silently coerce a bogus depth (escape-guard coverage).
+    client, _ = _client([{"jsonrpc": "2.0", "id": 1, "result": "not-hex"}])
+    with pytest.raises(RpcError):
+        client.confirmations({"blockNumber": "0x10"})
+
+
+def test_wait_receipt_propagates_rpc_error_mid_poll():
+    # The receipt poll hits an RPC-level error: wait_receipt must RAISE
+    # (fail closed) — never fabricate a receipt, never loop forever.
+    responses = [{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "boom"}}]
+    ticks = iter([0.0, 1.0, 2.0, 3.0])
+    client, _ = _client(responses, monotonic=lambda: next(ticks))
+    with pytest.raises(RpcError):
+        client.wait_receipt("0xabc")
+
+
 def test_call_raises_on_error_field():
     client, _ = _client([{"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "boom"}}])
     with pytest.raises(RpcError):
