@@ -38,6 +38,7 @@ same reconcile path the live coordinator uses — never optimistically off the i
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -49,8 +50,11 @@ from magic_agent.cmc_source import CmcCandidateSource, RawCmcQuote
 from magic_agent.compliance import ComplianceLedger
 from magic_agent.decision_pipeline import DecisionPipeline
 from magic_agent.eligibility import EligibilityLedger
-from magic_agent.execution_journal import ExecutionJournal
+from magic_agent.execution_coordinator import ExecutionCoordinator
+from magic_agent.execution_journal import ExecutionJournal, ExecutionState
 from magic_agent.frames import FixtureFrameSource, GateioFrameSource
+from magic_agent.live_balances import StaticRpcClient, TwakBalanceReader
+from magic_agent.live_quotes import TwakQuoteProvider
 from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
 from magic_agent.paper_adapter import PaperExecutionAdapter
@@ -64,6 +68,7 @@ from magic_agent.runtime_journals import DecisionJournal, ExclusionJournal
 from magic_agent.runtime_state import RuntimeState
 from magic_agent.scanner_gateway import ScannerGateway
 from magic_agent.state_journal import StateJournal
+from magic_agent.twak import TwakRunner
 from magic_agent.watchlist import WatchlistManager, WatchlistState
 
 # Pinned scanner commit recorded on every authorized setup (replay provenance).
@@ -80,6 +85,23 @@ _DEFAULT_FIXTURE_DIR = Path(__file__).resolve().parents[2] / "tests" / "fixtures
 
 # Paper starting equity (no funds — this is a simulated book size).
 _DEFAULT_STARTING_EQUITY = Decimal("10000")
+
+# Live (twak) mode requires every one of these to be present and non-empty, or
+# build_app fails closed BEFORE constructing any live port (no half-wired live runtime).
+_LIVE_REQUIRED_ENV = (
+    "TWAK_ACCESS_ID",
+    "TWAK_HMAC_SECRET",
+    "TWAK_WALLET_PASSWORD",
+    "BSC_RPC_URL",
+    "CMC_API_KEY",
+    "WALLET_ADDRESS",
+)
+
+
+def _require_live_env() -> None:
+    missing = [name for name in _LIVE_REQUIRED_ENV if not os.environ.get(name)]
+    if missing:
+        raise RuntimeError(f"missing live secret(s): {', '.join(missing)}")
 
 
 class FixtureCmcClient:
@@ -147,6 +169,26 @@ class _GoldOverrideRegistry:
 
     def by_contract_key(self, identity_key: str) -> Any:
         return self._promote(self._registry.by_contract_key(identity_key))
+
+
+class _LiveExecutionView:
+    """Expose ``confirmed_records()`` over the live chain ExecutionJournal.
+
+    ``run_cycle`` feeds ``app.execution_journal.confirmed_records()`` to the
+    compliance ledger. In live mode the execution port is the ExecutionCoordinator
+    (which has no ``confirmed_records()``); this view reads the RECONCILED records
+    from the SAME chain journal the coordinator writes to and ``reconcile_unfinished``
+    scans, so all three consumers share one source of execution truth.
+    """
+
+    def __init__(self, journal: ExecutionJournal) -> None:
+        self._journal = journal
+
+    def confirmed_records(self) -> list:
+        return [
+            record for record in self._journal.records.values()
+            if record.state == ExecutionState.RECONCILED
+        ]
 
 
 @dataclass
@@ -270,12 +312,18 @@ def build_app(
     scanner_gateway: Any = None,
     gold_candidate_symbol: str | None = None,
     frame_source: Any = None,
+    twak_runner: Any = None,
+    live_rpc: Any = None,
+    live_balances: Any = None,
+    live_executability: Any = None,
+    live_execution_coordinator: Any = None,
 ) -> App:
     """Assemble the runtime :class:`App`.
 
     Args:
-        mode: ``"paper"`` (default, offline, no funds) or ``"twak"`` (live — out of
-            scope here, raises ``NotImplementedError``).
+        mode: ``"paper"`` (default, offline, no funds) or ``"twak"`` (live — wires
+            the TWAK execution coordinator + quote provider + live balance/RPC ports;
+            requires all live secrets, fails closed otherwise).
         root_dir: Directory for the ``.magic_agent`` journal tree (defaults to CWD).
         starting_equity: Paper session starting equity (a simulated book size).
         eligibility_path: Track-1 eligibility ledger JSON.
@@ -300,20 +348,16 @@ def build_app(
         The assembled :class:`App`.
 
     Raises:
-        NotImplementedError: For ``mode="twak"`` (live execution is out of scope).
+        ValueError: For an unknown ``mode``.
+        RuntimeError: In live mode, when a required live secret is missing (fail
+            closed before any live port is constructed).
     """
-    if mode == "twak":
-        # LIVE is out of scope for this task. The live wiring would bind the TWAK
-        # execution coordinator + TWAK-backed quote provider + GateioFrameSource +
-        # the x402 CMC client (signing real swaps). Paper must fully work; live is
-        # a deliberate follow-on.
-        raise NotImplementedError(
-            "live (twak) runtime assembly is out of scope; the TWAK coordinator, "
-            "TWAK quote provider, GateioFrameSource, and x402 CMC client are wired "
-            "on testnet as a follow-on. Use mode='paper' (the default)."
-        )
-    if mode != "paper":
+    if mode not in ("paper", "twak"):
         raise ValueError(f"unknown mode {mode!r} (expected 'paper' or 'twak')")
+    live_mode = mode == "twak"
+    if live_mode:
+        # Fail closed BEFORE constructing any live port: no half-wired live runtime.
+        _require_live_env()
 
     journal_root = Path(root_dir) if root_dir is not None else Path.cwd()
     base = journal_root / ".magic_agent"
@@ -348,7 +392,9 @@ def build_app(
     else:
         state = RuntimeState.new_session(starting_equity)
 
-    # CMC candidate source (offline client by default).
+    # CMC candidate source (offline client by default). The real x402 live CMC client
+    # is a separate deferred concern; in live mode this still defaults to the offline
+    # FixtureCmcClient unless an explicit cmc_client is injected.
     cmc_source = CmcCandidateSource(eligibility, registry, cmc_client or FixtureCmcClient())
     candidate_source = CandidateSource(eligibility, registry)
     # The offline paper watchlist is restricted to the symbols that HAVE a committed
@@ -364,7 +410,7 @@ def build_app(
     # if live data is explicitly requested (still no funds, no keys).
     if frame_source is not None:
         pass  # caller-injected source (used by both the scanner gateway and paper-exit observe)
-    elif use_live_frames:
+    elif live_mode or use_live_frames:
         frame_source = GateioFrameSource(registry=registry)
     else:
         frame_source = FixtureFrameSource(registry=registry, fixture_dir=fixture_dir)
@@ -373,10 +419,10 @@ def build_app(
         registry=registry, frame_source=frame_source, scanner_commit=SCANNER_COMMIT,
     )
 
-    # Risk + executability (deterministic paper quotes, no network).
+    # Risk policy (shared by both modes). The executability port + execution port are
+    # computed per-mode below, AFTER paper_adapter (the live coordinator needs the
+    # position manager, and the per-mode split lives in one place).
     risk_policy = RiskPolicy(RiskConfig.defaults())
-    quote_provider = PaperQuoteProvider(now=_iso(state))
-    executability = ExecutabilityAdapter(quote_provider)
 
     # Position manager: paper books reconciled positions. The positions feed is
     # the manager's own reconcile book (the SINGLE source for both exits and the
@@ -424,7 +470,41 @@ def build_app(
     # The paper execution port: it is BOTH the execution coordinator (.submit) and
     # the execution_journal compliance reads (.confirmed_records). Recovery reads
     # the separate chain journal (.records) via App.reconcile_unfinished.
+    # NOTE: the exit ports above (PaperExitPorts) remain paper-driven for now; live
+    # exits (real fills / chain truth) are wired in the next task (0D).
     paper_adapter = PaperExecutionAdapter(positions=position_manager)
+
+    # Per-mode executability + execution port + execution journal. In paper the
+    # PaperExecutionAdapter is both port and journal; in live the port is the real
+    # ExecutionCoordinator and compliance reads RECONCILED records off the chain
+    # journal via _LiveExecutionView (the SAME journal the coordinator writes to and
+    # recovery scans — one source of execution truth).
+    if live_mode:
+        live_twak = twak_runner or TwakRunner()
+        wallet_address = os.environ.get("WALLET_ADDRESS", "")
+        rpc = live_rpc or StaticRpcClient()
+        balances = live_balances or TwakBalanceReader(twak=live_twak)
+        quote_provider = TwakQuoteProvider(
+            twak=live_twak,
+            wallet_address=wallet_address,
+            stable_symbol="USDC",
+            chain="bsc",
+            now=_iso(state),
+        )
+        executability = live_executability or ExecutabilityAdapter(quote_provider)
+        execution_port = live_execution_coordinator or ExecutionCoordinator(
+            twak=live_twak,
+            rpc=rpc,
+            balances=balances,
+            journal=chain_journal,
+            positions=position_manager,
+            registry=registry,
+        )
+        execution_journal = _LiveExecutionView(chain_journal)
+    else:
+        executability = ExecutabilityAdapter(PaperQuoteProvider(now=_iso(state)))
+        execution_port = paper_adapter
+        execution_journal = paper_adapter
 
     return App(
         position_manager=position_manager,
@@ -439,9 +519,9 @@ def build_app(
         lifecycle_evaluator=LifecycleEvaluator(),
         pipeline=DecisionPipeline(),
         decision_journal=decision_journal,
-        execution_coordinator=paper_adapter,
+        execution_coordinator=execution_port,
         compliance=ComplianceLedger(),
-        execution_journal=paper_adapter,
+        execution_journal=execution_journal,
         state_journal=state_journal,
         position_store=position_store,
         mode=mode,

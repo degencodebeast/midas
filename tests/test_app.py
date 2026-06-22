@@ -634,3 +634,36 @@ def test_restarted_position_still_projects_real_entry_and_take_profit(tmp_path):
     assert position["entry_price"] == 100.0
     assert position["stop_loss"] == 90.0
     assert position["take_profit"] == 120.0
+
+
+def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    for name in (
+        "TWAK_ACCESS_ID",
+        "TWAK_HMAC_SECRET",
+        "TWAK_WALLET_PASSWORD",
+        "BSC_RPC_URL",
+        "CMC_API_KEY",
+        "WALLET_ADDRESS",
+    ):
+        monkeypatch.setenv(name, "test-secret")
+
+    fake_scanner = SimpleNamespace(scan=lambda candidate: None)
+    fake_cmc = FixtureCmcClient()
+    fake_frame_source = SimpleNamespace()
+    fake_twak = SimpleNamespace(json=lambda args, timeout=60: {"success": True, "data": {}})
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=fake_scanner,
+        cmc_client=fake_cmc,
+        frame_source=fake_frame_source,
+        twak_runner=fake_twak,
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+    )
+
+    assert app.mode == "twak"
+    assert app.execution_coordinator.__class__.__name__ == "ExecutionCoordinator"
+    assert app.state.canary_mode is True
