@@ -121,6 +121,33 @@ def test_as_dict_from_dict_round_trips_exactly():
     assert restored.canary_mode is False
 
 
+def test_mode_tag_is_persisted_and_round_trips():
+    # The "mode" tag lets a consumer detect a cross-mode/contaminated state file (a
+    # paper state.json restored into a live session). It is persisted and round-trips.
+    paper = RuntimeState.new_session(Decimal("10000"), mode="paper")
+    assert paper.mode == "paper"
+    assert paper.as_dict()["mode"] == "paper"
+    assert RuntimeState.from_dict(paper.as_dict()).mode == "paper"
+
+    live = RuntimeState.new_live_session(Decimal("20"), Decimal("10"), mode="twak")
+    assert live.mode == "twak"
+    assert RuntimeState.from_dict(live.as_dict()).mode == "twak"
+
+
+def test_mode_tag_defaults_none_and_is_excluded_from_equality():
+    # A legacy/untagged payload (no "mode" key) decodes to mode=None, and the tag does
+    # NOT perturb equality (compare=False) so the existing round-trip contract holds.
+    legacy = RuntimeState.new_session(Decimal("1000"))
+    assert legacy.mode is None
+    payload = legacy.as_dict()
+    del payload["mode"]
+    assert RuntimeState.from_dict(payload).mode is None
+    # Two states differing ONLY in mode remain equal (mode is compare=False).
+    a = RuntimeState.new_session(Decimal("1000"), mode="paper")
+    b = RuntimeState.new_session(Decimal("1000"), mode="twak")
+    assert a == b
+
+
 def test_round_trip_preserves_decimals_without_float_drift():
     # A value that is unrepresentable as a binary float must survive intact.
     state = RuntimeState.new_session(Decimal("1000"))

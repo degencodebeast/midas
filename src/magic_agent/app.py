@@ -112,6 +112,55 @@ def _require_live_env() -> None:
         raise RuntimeError(f"missing live secret(s): {', '.join(missing)}")
 
 
+# Relative tolerance for deciding a restored LIVE state's equity is "consistent" with
+# the freshly-read wallet equity. A live wallet is read at most a cycle ago, so any
+# meaningful divergence (let alone a paper $10k vs a $20 wallet) means the file is
+# stale/contaminated and must be discarded. 1% is generous for the same-wallet case
+# while still catching every cross-mode mismatch.
+_LIVE_EQUITY_TOLERANCE = Decimal("0.01")
+
+
+def _live_state_is_wallet_consistent(restored: RuntimeState, wallet_equity_usd: Decimal) -> bool:
+    """True only when a restored LIVE state may safely keep its canary/gate fields.
+
+    Requires BOTH: (1) the state was written by the LIVE (``"twak"``) run — a
+    paper-written or legacy/untagged (``None``) state is treated as cross-mode and
+    rejected; and (2) its equity is within :data:`_LIVE_EQUITY_TOLERANCE` of the real
+    wallet equity. A $10k paper book against a $20 wallet fails on both counts. When
+    in doubt (e.g. ``wallet_equity_usd == 0``) we reject and re-baseline — fail safe =
+    size off real money.
+    """
+    if restored.mode != "twak":
+        return False
+    if wallet_equity_usd <= 0:
+        return False
+    diff = abs(restored.equity_usd - wallet_equity_usd)
+    return diff <= wallet_equity_usd * _LIVE_EQUITY_TOLERANCE
+
+
+def _rebaseline_live_state(
+    restored: RuntimeState, wallet_equity_usd: Decimal, wallet_cash_usd: Decimal,
+) -> RuntimeState:
+    """Re-base a wallet-consistent LIVE state's money fields onto the real wallet.
+
+    Preserves the operationally-meaningful restored fields (canary mode/completion,
+    consecutive-stop count, exposure gate, promotion bookkeeping) but FORCES
+    equity/cash AND the drawdown anchors (peak/daily) to the wallet, so the risk
+    policy sizes off real money and never carries a stale peak that would fabricate a
+    drawdown. Only reached when :func:`_live_state_is_wallet_consistent` is True.
+    """
+    from dataclasses import replace
+
+    return replace(
+        restored,
+        equity_usd=wallet_equity_usd,
+        cash_usd=wallet_cash_usd,
+        peak_equity_usd=wallet_equity_usd,
+        daily_anchor_usd=wallet_equity_usd,
+        mode="twak",
+    )
+
+
 class FixtureCmcClient:
     """Deterministic, OFFLINE CMC client: no network, no keys, no x402.
 
@@ -492,7 +541,16 @@ def build_app(
         _require_live_env()
 
     journal_root = Path(root_dir) if root_dir is not None else Path.cwd()
-    base = journal_root / ".magic_agent"
+    # PART B — per-mode journal roots. Paper and live (twak) get DISTINCT journal
+    # trees (`.magic_agent/paper/` vs `.magic_agent/twak/`) so a paper run can NEVER
+    # write a state/journal/positions file that a live run reads (and vice-versa).
+    # This is the structural half of the live-sizing fix: even before Part A's
+    # wallet-truth re-baseline, a paper $10k state.json simply isn't on the live read
+    # path anymore. NOTE (serve): the dashboard reader (status_store.DEFAULT_STATUS_PATH
+    # = ".magic_agent/status.json") still points at the OLD shared location, so live
+    # status now lands at `.magic_agent/<mode>/status.json`; `serve` must be pointed at
+    # the per-mode path to reflect a live run (documented in the task report).
+    base = journal_root / ".magic_agent" / mode
 
     # Data inputs (offline).
     eligibility = EligibilityLedger.load(eligibility_path)
@@ -528,19 +586,52 @@ def build_app(
     if live_mode:
         live_twak = twak_runner or TwakRunner()
         balances = live_balances or TwakBalanceReader(twak=live_twak, registry=registry)
-    if state_journal.path.exists():
-        # RESTART: restore the persisted session. Do NOT overwrite the restored equity
-        # from the wallet (continuous live-equity tracking each cycle is a FOLLOW-UP).
-        state = RuntimeState.from_dict(state_journal.load())
-    elif live_mode:
-        # FRESH LIVE session: size off the REAL wallet (equity = native USD + USDC;
-        # cash = the deployable USDC) — NOT the $10k paper default. If the wallet read
-        # RAISES, it propagates: the operator must see a clear error and retry; we
-        # never silently fall back to the paper default (that would mis-size).
+    if live_mode:
+        # PART A — LIVE (twak): equity/cash ALWAYS come from the REAL wallet at every
+        # startup, NEVER inherited from a restored state file. The bug this fixes: a
+        # paper-written state.json ($10k) restored into a live session sized a $250
+        # trade off $10k instead of the ~$20 wallet (only an insufficient-balance
+        # rejection stopped it). If the wallet read RAISES, it propagates (fail
+        # closed) — we never silently fall back to a stale or paper default.
         equity = balances.wallet_equity()
-        state = RuntimeState.new_live_session(equity["equity_usd"], equity["cash_usd"])
+        wallet_equity_usd = equity["equity_usd"]
+        wallet_cash_usd = equity["cash_usd"]
+        if state_journal.path.exists():
+            restored = RuntimeState.from_dict(state_journal.load())
+            # Preserve canary-completion + the consecutive-stop/exposure gates ONLY
+            # when the restored state is itself LIVE-written AND its equity is
+            # wallet-consistent (within a small tolerance). In EVERY other case
+            # (paper-written, untagged/legacy, or an equity that drifted beyond
+            # tolerance) DISCARD the restored state and re-baseline a fresh live
+            # session off the wallet — fail safe = size off real money. Even in the
+            # preserve path, equity/cash/peak/anchor are re-based to the wallet (we
+            # MUST NOT keep a $10k peak against a $20 wallet — that would compute a
+            # ~99% drawdown and instantly DQ-halt).
+            if _live_state_is_wallet_consistent(restored, wallet_equity_usd):
+                state = _rebaseline_live_state(restored, wallet_equity_usd, wallet_cash_usd)
+            else:
+                _log.warning(
+                    "discarding stale/cross-mode state.json (mode=%s, restored_equity=%s) "
+                    "and re-basing equity to the live wallet (equity=%s, cash=%s)",
+                    restored.mode, restored.equity_usd, wallet_equity_usd, wallet_cash_usd,
+                )
+                state = RuntimeState.new_live_session(
+                    wallet_equity_usd, wallet_cash_usd, mode="twak",
+                )
+        else:
+            # FRESH LIVE session: size off the wallet (equity = native USD + USDC;
+            # cash = the deployable USDC) — NOT the $10k paper default.
+            state = RuntimeState.new_live_session(
+                wallet_equity_usd, wallet_cash_usd, mode="twak",
+            )
+    elif state_journal.path.exists():
+        # PAPER RESTART: restore the persisted session unchanged (equity/drawdown
+        # anchors, canary mode, consecutive-stop count, exposure gate) so a halted or
+        # drawn-down paper agent does not silently resume from a fresh session.
+        state = RuntimeState.from_dict(state_journal.load())
     else:
-        state = RuntimeState.new_session(starting_equity)
+        # FRESH PAPER session: the $10k simulated book size (unchanged).
+        state = RuntimeState.new_session(starting_equity, mode="paper")
 
     # CMC candidate source. Selection precedence:
     #   1. an explicit injected ``cmc_client`` (tests / overrides) — always wins;

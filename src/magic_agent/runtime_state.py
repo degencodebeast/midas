@@ -79,6 +79,12 @@ class RuntimeState:
     normal_scoring_started_at: str | None = None
     cost_viability_evidence: dict[str, Any] | None = None
     auto_promote_after_canary: bool = True
+    # The run mode that WROTE this state ("paper"/"twak"/None). Persisted so a
+    # consumer can detect a cross-mode/contaminated state file (e.g. a paper-written
+    # state.json restored into a live session) and re-baseline off real money rather
+    # than inherit the wrong book size. Excluded from equality (compare=False) so it
+    # never perturbs the existing round-trip/equality contract; it IS persisted.
+    mode: str | None = field(default=None, compare=False)
     # Live source for the open-position count, wired by ``build_app`` to the
     # position manager's reconcile book so a booked position is visible to the
     # next cycle's concurrency cap and a close/exit decrements it. Excluded from
@@ -90,12 +96,12 @@ class RuntimeState:
     )
 
     @classmethod
-    def new_session(cls, starting_equity: Decimal) -> "RuntimeState":
+    def new_session(cls, starting_equity: Decimal, *, mode: str | None = None) -> "RuntimeState":
         """Build a fresh session from a starting equity.
 
         Peak and daily anchor seed to the starting equity, cash equals equity
         (no open positions), there are no stops, equity is fresh, the canary is
-        armed, and new exposure is unblocked.
+        armed, and new exposure is unblocked. ``mode`` tags which run wrote it.
         """
         if not isinstance(starting_equity, Decimal):
             raise TypeError("starting_equity must be a Decimal, not float")
@@ -106,10 +112,11 @@ class RuntimeState:
             cash_usd=starting_equity,
             peak_equity_usd=starting_equity,
             daily_anchor_usd=starting_equity,
+            mode=mode,
         )
 
     @classmethod
-    def new_live_session(cls, equity_usd: Decimal, cash_usd: Decimal) -> "RuntimeState":
+    def new_live_session(cls, equity_usd: Decimal, cash_usd: Decimal, *, mode: str | None = None) -> "RuntimeState":
         """Build a fresh LIVE session from the real wallet's equity and cash.
 
         Mirrors :meth:`new_session` (peak + daily anchor seed to ``equity_usd``, no
@@ -128,6 +135,7 @@ class RuntimeState:
             cash_usd=cash_usd,
             peak_equity_usd=equity_usd,
             daily_anchor_usd=equity_usd,
+            mode=mode,
         )
 
     def risk_state(self) -> PortfolioRiskState:
@@ -184,6 +192,8 @@ class RuntimeState:
         for name in _OPTIONAL_STRING_FIELDS:
             payload[name] = getattr(self, name)
         payload["cost_viability_evidence"] = self.cost_viability_evidence
+        # Mode tag: lets a consumer detect a cross-mode/contaminated state file.
+        payload["mode"] = self.mode
         return payload
 
     @classmethod
@@ -198,4 +208,7 @@ class RuntimeState:
         for name in _OPTIONAL_STRING_FIELDS:
             kwargs[name] = data.get(name)
         kwargs["cost_viability_evidence"] = data.get("cost_viability_evidence")
+        # Older state files predate the mode tag -> None (treated as "unknown mode",
+        # which the live re-baseline path conservatively discards as cross-mode).
+        kwargs["mode"] = data.get("mode")
         return cls(**kwargs)

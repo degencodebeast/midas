@@ -98,7 +98,7 @@ def test_narrative_write_failure_does_not_block_promotion_or_persistence(tmp_pat
     assert app.state.canary_mode is False
     assert app.state.promotion_reason == "canary_reconciled_cost_viable"
     # End-of-cycle persistence still ran (state.json written).
-    assert (tmp_path / ".magic_agent" / "state.json").exists()
+    assert (tmp_path / ".magic_agent" / "paper" / "state.json").exists()
 
 
 def test_approved_canary_without_auto_promote_requires_manual(tmp_path):

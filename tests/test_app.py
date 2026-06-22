@@ -270,7 +270,7 @@ def test_build_app_restores_persisted_runtime_state_on_restart(tmp_path):
     persists a distinctive state, then rebuilds against the SAME root and asserts the
     persisted values survive.
     """
-    base = tmp_path / ".magic_agent"
+    base = tmp_path / ".magic_agent" / "paper"
     journal = StateJournal(base / "state.json")
 
     # A distinctive, NON-default state: equity drawn down to 1234, two consecutive
@@ -306,7 +306,7 @@ def test_build_app_fails_closed_on_corrupt_state_file(tmp_path):
     Falling back to a fresh session on corruption would let a halted agent resume
     trading. build_app must surface the IntegrityError instead.
     """
-    base = tmp_path / ".magic_agent"
+    base = tmp_path / ".magic_agent" / "paper"
     base.mkdir(parents=True, exist_ok=True)
     # A wrapper whose sha256 does not match its payload -> IntegrityError on load.
     (base / "state.json").write_text(
@@ -555,7 +555,7 @@ def test_build_app_fails_closed_on_corrupt_positions_store(tmp_path):
     would re-enter the same setup. Consistent with #65-I's corrupt-state behavior,
     build_app must surface the IntegrityError instead of silently dropping positions.
     """
-    base = tmp_path / ".magic_agent"
+    base = tmp_path / ".magic_agent" / "paper"
     base.mkdir(parents=True, exist_ok=True)
     # A wrapper whose sha256 does not match its payload -> IntegrityError on load.
     (base / "positions.json").write_text(
@@ -599,7 +599,7 @@ def test_paper_cycle_publishes_live_status_snapshot(tmp_path):
     assert len(app.position_manager.book) == 1
 
     # The snapshot file exists under the App's base dir and is readable.
-    status_path = tmp_path / ".magic_agent" / "status.json"
+    status_path = tmp_path / ".magic_agent" / "paper" / "status.json"
     assert status_path.exists(), "run_cycle did not publish a status snapshot"
     snapshot = read_status_snapshot(status_path)
     assert snapshot is not None
@@ -636,7 +636,7 @@ def test_paper_status_snapshot_projects_real_entry_and_take_profit(tmp_path):
     run_live(app, clock=_clock(now), max_iters=1)
     assert len(app.position_manager.book) == 1
 
-    status_path = tmp_path / ".magic_agent" / "status.json"
+    status_path = tmp_path / ".magic_agent" / "paper" / "status.json"
     snapshot = read_status_snapshot(status_path)
     assert snapshot is not None
     assert len(snapshot["positions"]) == 1
@@ -681,7 +681,7 @@ def test_restarted_position_still_projects_real_entry_and_take_profit(tmp_path):
 
     # Republish status over the restored book and assert the projection is intact.
     app2.publish_status()
-    snapshot = read_status_snapshot(tmp_path / ".magic_agent" / "status.json")
+    snapshot = read_status_snapshot(tmp_path / ".magic_agent" / "paper" / "status.json")
     assert snapshot is not None
     assert len(snapshot["positions"]) == 1
     position = snapshot["positions"][0]
@@ -873,14 +873,18 @@ def test_build_app_twak_fails_closed_when_wallet_equity_read_raises(tmp_path, mo
         )
 
 
-def test_build_app_twak_restart_keeps_persisted_equity_not_wallet(tmp_path, monkeypatch):
-    # On RESTART (an existing state.json) build_app restores the persisted equity and
-    # does NOT overwrite it from the wallet (continuous live-equity tracking is a
-    # documented follow-up).
+def test_build_app_twak_restart_rebaselines_equity_to_wallet_not_state(tmp_path, monkeypatch):
+    # FIX A (the critical regression). This test PREVIOUSLY asserted the OLD, BUGGY
+    # behavior: that a RESTORED state.json's equity wins on a live restart. That is the
+    # defect — a stale/cross-mode state.json (e.g. a $123 live state, or worst-case a
+    # $10k PAPER state) would size live trades off the WRONG book size. In live mode
+    # the real wallet MUST be the source of truth at every startup. Here the restored
+    # live state ($123.45) diverges far beyond tolerance from the wallet ($999), so it
+    # is DISCARDED and equity/cash are re-based to the wallet.
     _twak_env(monkeypatch)
-    base = tmp_path / ".magic_agent"
+    base = tmp_path / ".magic_agent" / "twak"
     base.mkdir(parents=True, exist_ok=True)
-    persisted = RuntimeState.new_live_session(Decimal("123.45"), Decimal("50.00"))
+    persisted = RuntimeState.new_live_session(Decimal("123.45"), Decimal("50.00"), mode="twak")
     StateJournal(base / "state.json").save(persisted.as_dict())
 
     app = build_app(
@@ -894,9 +898,135 @@ def test_build_app_twak_restart_keeps_persisted_equity_not_wallet(tmp_path, monk
         live_balances=_fake_live_balances(equity_usd=Decimal("999"), cash_usd=Decimal("999")),
     )
 
-    # Restored from state.json, NOT re-read from the wallet (999).
-    assert app.state.equity_usd == Decimal("123.45")
-    assert app.state.cash_usd == Decimal("50.00")
+    # Re-read from the WALLET (999), NOT inherited from the restored state (123.45).
+    assert app.state.equity_usd == Decimal("999")
+    assert app.state.cash_usd == Decimal("999")
+    # Anchors re-based to the wallet too, so no fabricated drawdown against a stale peak.
+    assert app.state.peak_equity_usd == Decimal("999")
+    assert app.state.daily_anchor_usd == Decimal("999")
+
+
+def test_build_app_twak_restart_paper_state_10k_uses_wallet_not_10k(tmp_path, monkeypatch):
+    # THE HEADLINE REGRESSION. A pre-existing PAPER-style state.json (equity 10000),
+    # placed where the live build would read it, MUST NOT size the live session. Live
+    # equity/cash come from the real wallet (~$20/$10); sizing a 5%-stop A-grade setup
+    # then deploys ~$1 (5% of the $20 wallet), NOT $250.
+    from magic_agent.risk_policy import (
+        ActionPurpose,
+        MarketRiskContext,
+        QuantityCaps,
+    )
+
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    base.mkdir(parents=True, exist_ok=True)
+    # A paper-written $10k state.json, mode-tagged "paper" (as a real paper run writes).
+    poison = RuntimeState.new_session(Decimal("10000"), mode="paper")
+    StateJournal(base / "state.json").save(poison.as_dict())
+
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_fake_live_balances(equity_usd=Decimal("20"), cash_usd=Decimal("10")),
+    )
+
+    # Equity/cash come from the WALLET, NOT the poisoned $10k paper state.
+    assert app.state.equity_usd == Decimal("20")
+    assert app.state.cash_usd == Decimal("10")
+    assert app.state.equity_usd != Decimal("10000")
+
+    # Size a 5%-stop A-grade setup through the REAL risk policy: deploy ~= 5% of the
+    # WALLET equity ($20 * 0.05 = $1), NOT $250 (or $500 off a $10k book).
+    setup = AuthorizedSetup.example(
+        grade="A", raw_grade="A", structural_stop=Decimal("95"),  # entry 100, 5% stop
+    )
+    decision = app.risk_policy.evaluate(
+        setup,
+        app.state.risk_state(),
+        ActionPurpose.STRATEGY,
+        QuantityCaps.unbounded(),
+        MarketRiskContext.aligned(),
+    )
+    assert decision.approved is True
+    assert decision.risk_budget_usd == Decimal("1.00")  # 5% of $20 wallet equity
+    assert decision.risk_budget_usd != Decimal("250")
+
+
+def test_paper_and_twak_use_separate_journal_dirs(tmp_path, monkeypatch):
+    # PART B: paper and twak get DISTINCT journal roots, so a paper run's state file is
+    # NOT on the twak read path (and vice-versa). Build a paper app over a root, which
+    # writes its tree under .magic_agent/paper/; assert nothing exists under
+    # .magic_agent/twak/, and that a twak build over the SAME root reads NO paper state
+    # (it sizes off the wallet as a fresh live session).
+    setup = AuthorizedSetup.example()
+    scanner_gateway = SimpleNamespace(scan=lambda candidate: setup)
+    paper_app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=scanner_gateway,
+        gold_candidate_symbol="ZEC",
+    )
+    run_live(paper_app, clock=_clock(datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)), max_iters=1)
+
+    # Paper wrote under .magic_agent/paper/, NOT under .magic_agent/twak/.
+    assert (tmp_path / ".magic_agent" / "paper" / "state.json").exists()
+    assert not (tmp_path / ".magic_agent" / "twak").exists()
+
+    # A twak build over the SAME root does not see the paper state -> fresh live
+    # session off the wallet (no paper $10k inherited).
+    _twak_env(monkeypatch)
+    twak_app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_fake_live_balances(equity_usd=Decimal("20"), cash_usd=Decimal("10")),
+    )
+    assert twak_app.state.equity_usd == Decimal("20")
+    assert twak_app.state.cash_usd == Decimal("10")
+
+
+def test_build_app_twak_restart_wallet_consistent_state_preserved(tmp_path, monkeypatch):
+    # A LIVE-written state whose equity is wallet-CONSISTENT (within tolerance) is
+    # PRESERVED: canary-completion and the consecutive-stop/exposure gates survive the
+    # restart, while equity/cash/anchors are still pinned to the freshly-read wallet.
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    base.mkdir(parents=True, exist_ok=True)
+    persisted = RuntimeState.new_live_session(Decimal("20.00"), Decimal("10.00"), mode="twak")
+    persisted.canary_mode = False
+    persisted.canary_completed = True
+    persisted.consecutive_stops = 2
+    StateJournal(base / "state.json").save(persisted.as_dict())
+
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        # Wallet within 1% of the restored 20.00 -> consistent.
+        live_balances=_fake_live_balances(equity_usd=Decimal("20.05"), cash_usd=Decimal("9.90")),
+    )
+
+    # Operational gates preserved from the restored live state...
+    assert app.state.canary_mode is False
+    assert app.state.canary_completed is True
+    assert app.state.consecutive_stops == 2
+    # ...but money fields are re-based to the freshly-read wallet (truth = real money).
+    assert app.state.equity_usd == Decimal("20.05")
+    assert app.state.cash_usd == Decimal("9.90")
+    assert app.state.peak_equity_usd == Decimal("20.05")
 
 
 def test_live_after_entry_sell_quote_probe_raise_is_crash_safe(tmp_path, monkeypatch):
