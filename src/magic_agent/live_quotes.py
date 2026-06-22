@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from magic_agent.risk_policy import QuantityCaps
 
@@ -78,6 +78,11 @@ class TwakQuoteProvider:
         if str(data["network"]).lower() != self._chain.lower():
             reasons.append("unexpected_network")
         for field in ("output_qty", "minimum_output", "notional_usd"):
-            if Decimal(str(data[field])) <= 0:
+            try:
+                value = Decimal(str(data[field]))
+            except (InvalidOperation, TypeError):
+                reasons.append(f"malformed_{field}")
+                continue
+            if value <= 0:
                 reasons.append(f"nonpositive_{field}")
         return tuple(reasons)

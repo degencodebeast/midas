@@ -111,3 +111,37 @@ def test_twak_quote_provider_fails_closed_on_missing_cost_fields():
     assert result.approved is False
     assert result.reasons == ("missing_gas_usd",)
     assert result.quote is None
+
+
+def test_twak_quote_provider_fails_closed_on_non_numeric_required_field():
+    twak = FakeTwak(_payload(output_qty="abc"))
+    provider = TwakQuoteProvider(
+        twak=twak,
+        wallet_address="0xwallet",
+        stable_symbol="USDC",
+        chain="bsc",
+        now="2026-06-22T12:00:00Z",
+    )
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("10"))
+
+    assert result.approved is False
+    assert "malformed_output_qty" in result.reasons
+    assert result.quote is None
+
+
+def test_twak_quote_provider_fails_closed_on_nonpositive_required_field():
+    twak = FakeTwak(_payload(output_qty="0"))
+    provider = TwakQuoteProvider(
+        twak=twak,
+        wallet_address="0xwallet",
+        stable_symbol="USDC",
+        chain="bsc",
+        now="2026-06-22T12:00:00Z",
+    )
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("10"))
+
+    assert result.approved is False
+    assert "nonpositive_output_qty" in result.reasons
+    assert result.quote is None
