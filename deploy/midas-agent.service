@@ -1,0 +1,20 @@
+[Unit]
+Description=MIDAS Track-1 spot agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=midas
+WorkingDirectory=/opt/midas
+# live ports must exist and the operator must approve before enabling this unit.
+# /etc/midas/agent.env must be root-owned chmod 600 and contain:
+# TWAK_ACCESS_ID, TWAK_HMAC_SECRET, TWAK_WALLET_PASSWORD, WALLET_ADDRESS,
+# BSC_RPC_URL, CMC_API_KEY.
+EnvironmentFile=/etc/midas/agent.env
+ExecStart=/opt/midas/.venv/bin/magic-agent run --executor twak
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

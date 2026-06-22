@@ -65,6 +65,16 @@ def run_cycle(app, now) -> None:
         # dashboard reflects the post-exit book this cycle (consistent with the save).
         app.publish_status()
         return
+    # Operator kill-switch: halt NEW ENTRIES while preserving protective exits (which
+    # already ran above via process_exits). Persist + publish the post-exit state, then
+    # return WITHOUT entering the entry phase. Never placed before process_exits.
+    if getattr(app, "kill_switch_path", None) is not None and app.kill_switch_path.exists():
+        app.exclusion_journal.append_code("TRACK1", "kill_switch_halt_new_entries", now)
+        app.compliance.observe(app.execution_journal.confirmed_records(), now)
+        app.state_journal.save(app.state.as_dict())
+        app.position_store.save(app.position_manager.book)
+        app.publish_status()
+        return
     cmc_batch = app.cmc_source.snapshot(now)
     snapshots = cmc_batch.snapshots
     app.exclusion_journal.append_many(cmc_batch.exclusions, now)

@@ -256,6 +256,9 @@ class App:
     # ``None`` when unregistered — the UI shows an honest "unregistered" badge,
     # never a fabricated id. Not wired in paper yet (a deliberate follow-on).
     agent_id: str | None = None
+    # Operator kill-switch: when this file exists, run_cycle halts NEW ENTRIES (but
+    # NEVER protective exits — those run first, unconditionally). None disables it.
+    kill_switch_path: Path | None = None
     # The real chain journal recovery scans (.records). Bound here so
     # reconcile_unfinished closes over it; never read by run_cycle directly.
     _chain_journal: ExecutionJournal = None  # type: ignore[assignment]
@@ -559,6 +562,7 @@ def build_app(
         # Publish the live status snapshot under the SAME .magic_agent base the
         # serve /api/status reader loads, so the dashboard reflects live paper data.
         status_dir=base,
+        kill_switch_path=base / "HALT_NEW_ENTRIES",
         _chain_journal=chain_journal,
     )
 

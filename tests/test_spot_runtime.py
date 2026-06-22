@@ -126,3 +126,23 @@ def test_pipeline_rejects_hand_built_decision_inputs():
     )
     with pytest.raises(ValueError, match="must come from LifecycleEvaluator"):
         DecisionPipeline().decide(foreign)
+
+
+def test_kill_switch_blocks_entries_but_not_exits(tmp_path):
+    app, executions, alerts, now = _app(authorized=True)
+    exit_calls = []
+
+    def process_exits(observed_at):
+        exit_calls.append(observed_at)
+        return 0
+
+    app.position_manager.process_exits = process_exits
+    kill_switch = tmp_path / "HALT_NEW_ENTRIES"
+    kill_switch.write_text("halt", encoding="utf-8")
+    app.kill_switch_path = kill_switch
+
+    from magic_agent.runner import run_cycle
+    run_cycle(app, now)
+
+    assert exit_calls == [now]
+    assert executions == []
