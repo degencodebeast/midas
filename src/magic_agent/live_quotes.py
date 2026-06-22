@@ -69,18 +69,30 @@ class TwakQuoteProvider:
         self._probe_quantity = probe_quantity
 
     def __call__(self, setup, quantity: Decimal | None) -> TwakQuoteResult:
-        qty = self._probe_quantity if quantity is None else quantity
-        if qty <= 0:
+        # ``quantity`` is a TOKEN qty (units of the target token), matching the
+        # prepare_exact_order contract (the paper provider treats it the same way).
+        # A BUY swap's SOURCE amount is USDC, so we spend ``usdc_in = qty * entry``
+        # USDC. The probe call (quantity is None) only needs a valid quote to return
+        # quantity_caps, so it spends a small fixed USDC probe amount.
+        if quantity is None:
+            usdc_in = self._probe_quantity
+        else:
+            if quantity <= 0:
+                return TwakQuoteResult(
+                    False, ("nonpositive_quote_quantity",), QuantityCaps.unbounded(), None,
+                )
+            usdc_in = quantity * setup.entry
+        if usdc_in <= 0:
             return TwakQuoteResult(
                 False, ("nonpositive_quote_quantity",), QuantityCaps.unbounded(), None,
             )
         contract = self._registry.by_contract_key(setup.identity_key).contract_address
-        # BUY: first positional is the USDC SOURCE amount to spend.
+        # BUY: first positional is the USDC SOURCE amount to spend (usdc_in).
         payload = self._twak.json([
-            "swap", str(qty), self._stable_symbol, contract,
+            "swap", str(usdc_in), self._stable_symbol, contract,
             "--chain", self._chain, "--quote-only", "--json",
         ])
-        approved, reasons, quote = self._build_quote(payload, qty, setup)
+        approved, reasons, quote = self._build_quote(payload, usdc_in, setup)
         if not approved:
             return TwakQuoteResult(False, reasons, QuantityCaps.unbounded(), None)
         return TwakQuoteResult(True, (), QuantityCaps.unbounded(), quote)
@@ -114,6 +126,10 @@ class TwakQuoteProvider:
             "output_qty": str(output_qty),
             "output_symbol": output_symbol,
             "minimum_output": str(minimum_output),
+            # usdc_in is the USDC SOURCE amount actually spent for this quote, so the
+            # coordinator can execute the SAME amount. price = usdc_in / output_qty.
+            "usdc_in": str(usdc_in),
+            "input_usd": str(usdc_in),
             "price": str(usdc_in / output_qty),
             "provider": str(payload.get("provider", "")),
             "price_impact": str(price_impact),

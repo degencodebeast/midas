@@ -107,6 +107,93 @@ def test_cost_viability_fails_closed_on_nonfinite_numeric_field():
     assert "buy_malformed_slippage_bps" in inf_decision.denied_by
 
 
+def _live_quote(**changes):
+    # REAL twak live quote normalized shape: priceImpact + output/minReceived spread.
+    # NO gas_usd/fee_usd/impact_bps/slippage_bps/expires_at/notional_usd.
+    quote = {
+        "output_qty": "7.06622917239096244",
+        "minimum_output": "6.995566880667052816",
+        "price_impact": "0",
+        "provider": "0x",
+    }
+    quote.update(changes)
+    return quote
+
+
+def test_cost_viability_computes_live_round_trip_from_spread():
+    # Per leg: spread bps = (out - min)/out * 10000 ~= 100 bps; priceImpact "0" -> 0.
+    # Round trip (buy + sell) ~= 200 bps. With a generous cap it must be APPROVED and
+    # the evidence must report the spread-derived round-trip cost.
+    decision = evaluate_cost_viability(
+        buy_quote=_live_quote(),
+        sell_quote=_live_quote(),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("500")),
+    )
+
+    assert decision.approved is True, decision.denied_by
+    rt = Decimal(decision.evidence["estimated_round_trip_cost_bps"])
+    # ~200 bps from two ~100 bps spreads, priceImpact 0.
+    assert Decimal("180") < rt < Decimal("220")
+
+
+def test_cost_viability_denies_too_wide_live_spread():
+    # A very wide spread (min much smaller than out) blows past the cap.
+    wide = _live_quote(output_qty="100", minimum_output="80")  # 2000 bps spread/leg
+    decision = evaluate_cost_viability(
+        buy_quote=wide,
+        sell_quote=wide,
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("150")),
+    )
+
+    assert decision.approved is False
+    assert decision.denied_by == ("round_trip_cost_too_high",)
+
+
+def test_cost_viability_live_quote_with_priceimpact_adds_to_spread():
+    # priceImpact treated as a PERCENT -> bps = price_impact * 100. "1" -> 100 bps/leg.
+    decision = evaluate_cost_viability(
+        buy_quote=_live_quote(price_impact="1"),
+        sell_quote=_live_quote(price_impact="1"),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("1000")),
+    )
+
+    rt = Decimal(decision.evidence["estimated_round_trip_cost_bps"])
+    # ~200 (spread) + ~200 (2 legs * 100 bps impact) ~= 400 bps.
+    assert Decimal("380") < rt < Decimal("420")
+
+
+def test_cost_viability_live_quote_not_denied_for_missing_expires_at():
+    # The real CLI omits expires_at; a live quote must NOT be denied for expiry.
+    decision = evaluate_cost_viability(
+        buy_quote=_live_quote(),
+        sell_quote=_live_quote(),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("500")),
+    )
+
+    assert not any("expired" in d or "expires_at" in d for d in decision.denied_by)
+
+
+def test_cost_viability_fails_closed_when_neither_schema_present():
+    # A quote with neither the paper fields nor the live fields must fail closed.
+    decision = evaluate_cost_viability(
+        buy_quote={"provider": "0x", "price": "1"},
+        sell_quote={"provider": "0x", "price": "1"},
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+    )
+
+    assert decision.approved is False
+    assert decision.denied_by != ()
+
+
 def test_cost_viability_handles_naive_now_without_crash():
     decision = evaluate_cost_viability(
         buy_quote=_quote(),

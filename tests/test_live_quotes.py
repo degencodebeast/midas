@@ -80,10 +80,12 @@ def _provider(twak, registry=None):
 
 
 def test_buy_quote_emits_real_command_with_contract_address():
+    # Probe (quantity=None) spends the fixed probe amount (1 USDC) as the SOURCE,
+    # which keeps the command-shape + contract-resolution assertion at "1".
     twak = FakeTwak(_buy_payload())
     provider = _provider(twak)
 
-    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
 
     assert result.approved is True
     assert result.reasons == ()
@@ -101,17 +103,18 @@ def test_buy_quote_emits_real_command_with_contract_address():
 
 
 def test_buy_quote_parses_real_schema_into_normalized_quote():
+    # Probe path: usdc_in == probe (1 USDC), matching the sample payload input "1 USDC".
     twak = FakeTwak(_buy_payload())
     provider = _provider(twak)
 
-    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
 
     quote = result.quote
     assert quote is not None
     assert Decimal(str(quote["output_qty"])) == Decimal("7.06622917239096244")
     assert quote["output_symbol"] == "APE"
     assert Decimal(str(quote["minimum_output"])) == Decimal("6.995566880667052816")
-    # price = usdc_in / output_qty
+    # price = usdc_in / output_qty (usdc_in == 1 USDC on the probe path)
     assert Decimal(str(quote["price"])) == Decimal("1") / Decimal("7.06622917239096244")
     assert quote["provider"] == "0x"
     assert Decimal(str(quote["price_impact"])) == Decimal("0")
@@ -129,6 +132,32 @@ def test_buy_quote_does_not_require_hallucinated_cost_fields():
     result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))
 
     assert result.approved is True
+
+
+def test_buy_quote_token_qty_swaps_usdc_source_amount():
+    # quantity is a TOKEN qty; the swap SOURCE amount must be qty * entry USDC,
+    # NOT the token qty itself. setup.entry == 100, so 50 tokens -> 5000 USDC.
+    twak = FakeTwak(_buy_payload(input="5000 USDC"))
+    provider = _provider(twak)
+    setup = AuthorizedSetup.example(identity_key="zec-bsc")
+    assert setup.entry == Decimal("100")
+
+    result = provider(setup, Decimal("50"))
+
+    assert result.approved is True
+    # source amount is 50 * 100 = 5000 USDC, not "50".
+    assert twak.calls == [(
+        ["swap", "5000", "USDC", _APE, "--chain", "bsc", "--quote-only", "--json"],
+        60,
+    )]
+    quote = result.quote
+    assert quote is not None
+    # usdc_in carried so the coordinator can execute the SAME amount.
+    assert Decimal(str(quote["usdc_in"])) == Decimal("5000")
+    # price = usdc_in / output_qty.
+    assert Decimal(str(quote["price"])) == Decimal("5000") / Decimal("7.06622917239096244")
+    # output_qty parsed from the real-schema payload.
+    assert Decimal(str(quote["output_qty"])) == Decimal("7.06622917239096244")
 
 
 def test_uses_probe_quantity_when_quantity_is_none():

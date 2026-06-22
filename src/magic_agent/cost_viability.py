@@ -18,7 +18,12 @@ class CostViabilityDecision:
     evidence: dict[str, Any]
 
 
-_REQUIRED = {
+# PAPER quote schema (quotes.py PaperQuoteProvider._leg) carries explicit
+# gas/fee/impact/slippage/notional fields. The REAL live quote (live_quotes.py
+# TwakQuoteProvider) carries NONE of these — only output_qty/minimum_output (a
+# slippage spread) and price_impact. We support BOTH and fail closed when neither
+# is computable.
+_PAPER_REQUIRED = {
     "output_qty",
     "minimum_output",
     "impact_bps",
@@ -28,6 +33,7 @@ _REQUIRED = {
     "fee_usd",
     "notional_usd",
 }
+_LIVE_REQUIRED = {"output_qty", "minimum_output", "price_impact"}
 
 
 def _parse_time(value: str) -> datetime:
@@ -49,21 +55,52 @@ def _decimal(value: object, code: str, denied: list[str]) -> Decimal:
     return parsed
 
 
-def _validate_quote(name: str, quote: dict | None, now: str, denied: list[str]) -> dict[str, Decimal]:
+def _spread_bps(output_qty: Decimal, minimum_output: Decimal) -> Decimal:
+    """Slippage spread in bps: (output_qty - minimum_output) / output_qty * 10000."""
+    return (output_qty - minimum_output) / output_qty * Decimal("10000")
+
+
+def _validate_quote(
+    name: str, quote: dict | None, now: str, denied: list[str]
+) -> dict[str, Decimal] | None:
+    """Validate one quote leg and return its per-leg cost components.
+
+    Returns a dict with at least ``cost_bps`` (the per-leg cost in bps) and, for
+    the paper schema, the additional fields used to compute fixed cost. Returns
+    ``None`` and records a denial reason when the quote is missing/malformed or
+    matches NEITHER the paper nor the live schema (fail closed).
+    """
     if quote is None:
         denied.append(f"missing_{name}_quote")
-        return {}
-    missing = sorted(_REQUIRED - set(quote))
+        return None
+
+    is_paper = _PAPER_REQUIRED <= set(quote)
+    is_live = _LIVE_REQUIRED <= set(quote)
+
+    if is_paper:
+        return _validate_paper(name, quote, now, denied)
+    if is_live:
+        return _validate_live(name, quote, denied)
+
+    # Neither schema is computable -> fail closed with a clear reason listing the
+    # paper fields that are missing (the paper schema is the superset).
+    missing = sorted(_PAPER_REQUIRED - set(quote))
     for field in missing:
         denied.append(f"{name}_missing_{field}")
-    if missing:
-        return {}
+    return None
+
+
+def _validate_paper(
+    name: str, quote: dict, now: str, denied: list[str]
+) -> dict[str, Decimal]:
+    # Expiry check applies only to the paper schema (the live CLI omits expires_at).
     try:
         if _parse_time(str(quote["expires_at"])) <= _parse_time(now):
             denied.append(f"{name}_quote_expired")
     except (ValueError, TypeError):
         denied.append(f"{name}_malformed_expires_at")
     values = {
+        "schema": "paper",
         "output_qty": _decimal(quote["output_qty"], f"{name}_malformed_output_qty", denied),
         "minimum_output": _decimal(quote["minimum_output"], f"{name}_malformed_minimum_output", denied),
         "impact_bps": _decimal(quote["impact_bps"], f"{name}_malformed_impact_bps", denied),
@@ -81,6 +118,30 @@ def _validate_quote(name: str, quote: dict | None, now: str, denied: list[str]) 
     return values
 
 
+def _validate_live(name: str, quote: dict, denied: list[str]) -> dict[str, Decimal]:
+    # SPREAD-ONLY policy: the real CLI returns no gas/fee/notional, so we cannot
+    # compute fixed (USD) cost. We charge the slippage spread plus priceImpact.
+    #
+    # priceImpact UNIT ASSUMPTION: the sample value is "0", which gives no signal
+    # about the unit. We treat priceImpact as a PERCENT (e.g. "1" -> 1% -> 100 bps),
+    # the 0x/twak convention. This is conservative for the common <1% range and
+    # MUST be confirmed against a real non-zero-impact quote; "0" maps to ~0 bps
+    # either way.
+    output_qty = _decimal(quote["output_qty"], f"{name}_malformed_output_qty", denied)
+    minimum_output = _decimal(quote["minimum_output"], f"{name}_malformed_minimum_output", denied)
+    price_impact = _decimal(quote["price_impact"], f"{name}_malformed_price_impact", denied)
+    if output_qty <= 0:
+        denied.append(f"{name}_nonpositive_output")
+    if minimum_output <= 0:
+        denied.append(f"{name}_nonpositive_minimum_output")
+    return {
+        "schema": "live",
+        "output_qty": output_qty,
+        "minimum_output": minimum_output,
+        "price_impact": price_impact,
+    }
+
+
 def evaluate_cost_viability(
     *,
     buy_quote: dict | None,
@@ -93,25 +154,54 @@ def evaluate_cost_viability(
     denied: list[str] = []
     buy = _validate_quote("buy", buy_quote, now, denied)
     sell = _validate_quote("sell", sell_quote, now, denied)
-    if denied:
+    if denied or buy is None or sell is None:
         return CostViabilityDecision(False, tuple(denied), {
             "approved": False,
             "intended_risk_fraction": str(intended_risk_fraction),
             "denied_by": tuple(denied),
         })
-    notional = min(buy["notional_usd"], sell["notional_usd"])
-    fixed_cost_bps = (buy["gas_usd"] + buy["fee_usd"] + sell["gas_usd"] + sell["fee_usd"]) / notional * Decimal("10000")
-    variable_cost_bps = buy["impact_bps"] + buy["slippage_bps"] + sell["impact_bps"] + sell["slippage_bps"]
-    round_trip = fixed_cost_bps + variable_cost_bps
-    evidence = {
-        "approved": round_trip <= cfg.max_round_trip_cost_bps,
-        "intended_risk_fraction": str(intended_risk_fraction),
-        "estimated_notional_usd": str(notional),
-        "buy_impact_bps": str(buy["impact_bps"]),
-        "sell_impact_bps": str(sell["impact_bps"]),
-        "estimated_round_trip_cost_bps": f"{round_trip:.2f}",
-        "max_round_trip_cost_bps": str(cfg.max_round_trip_cost_bps),
-    }
+
+    if buy["schema"] == "paper" and sell["schema"] == "paper":
+        notional = min(buy["notional_usd"], sell["notional_usd"])
+        fixed_cost_bps = (
+            buy["gas_usd"] + buy["fee_usd"] + sell["gas_usd"] + sell["fee_usd"]
+        ) / notional * Decimal("10000")
+        variable_cost_bps = (
+            buy["impact_bps"] + buy["slippage_bps"] + sell["impact_bps"] + sell["slippage_bps"]
+        )
+        round_trip = fixed_cost_bps + variable_cost_bps
+        evidence = {
+            "approved": round_trip <= cfg.max_round_trip_cost_bps,
+            "intended_risk_fraction": str(intended_risk_fraction),
+            "estimated_notional_usd": str(notional),
+            "buy_impact_bps": str(buy["impact_bps"]),
+            "sell_impact_bps": str(sell["impact_bps"]),
+            "estimated_round_trip_cost_bps": f"{round_trip:.2f}",
+            "max_round_trip_cost_bps": str(cfg.max_round_trip_cost_bps),
+        }
+    else:
+        # SPREAD-ONLY (live, or any mix involving a live leg): per leg cost is the
+        # slippage spread bps plus priceImpact (percent -> bps). No gas/fee data.
+        def _leg_cost(leg: dict[str, Decimal]) -> tuple[Decimal, Decimal]:
+            spread = _spread_bps(leg["output_qty"], leg["minimum_output"])
+            impact = leg.get("price_impact", Decimal("0")) * Decimal("100")
+            return spread, impact
+
+        buy_spread, buy_impact = _leg_cost(buy)
+        sell_spread, sell_impact = _leg_cost(sell)
+        round_trip = buy_spread + buy_impact + sell_spread + sell_impact
+        evidence = {
+            "approved": round_trip <= cfg.max_round_trip_cost_bps,
+            "intended_risk_fraction": str(intended_risk_fraction),
+            "cost_model": "spread_only",
+            "buy_spread_bps": f"{buy_spread:.2f}",
+            "sell_spread_bps": f"{sell_spread:.2f}",
+            "buy_impact_bps": f"{buy_impact:.2f}",
+            "sell_impact_bps": f"{sell_impact:.2f}",
+            "estimated_round_trip_cost_bps": f"{round_trip:.2f}",
+            "max_round_trip_cost_bps": str(cfg.max_round_trip_cost_bps),
+        }
+
     if round_trip > cfg.max_round_trip_cost_bps:
         return CostViabilityDecision(False, ("round_trip_cost_too_high",), evidence)
     return CostViabilityDecision(True, (), evidence)

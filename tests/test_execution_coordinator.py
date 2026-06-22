@@ -118,6 +118,51 @@ def _coordinator(tmp_path, *, twak, rpc, balances, positions, required_confirmat
     ), journal
 
 
+def test_buy_swap_spends_usdc_source_amount_not_token_qty(tmp_path):
+    # The buy swap SOURCE amount is USDC = intent.quantity * setup.entry, NOT the
+    # token qty. intent.quantity == 10, setup.entry == 100 -> 1000 USDC.
+    twak = FakeTwak()
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("2000"), "token": Decimal("0")},
+        {"stable": Decimal("1000"), "token": Decimal("95")},
+    ])
+    positions = SpyPositions()
+    coord, _journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+    intent = _intent()
+    assert intent.setup.entry == Decimal("100")
+
+    result = coord.submit(intent, quote={"price": "1"}, policy=PolicyConfig(max_notional=1000.0))
+
+    assert result == "RECONCILED"
+    # USDC source amount = 10 * 100 = 1000, NOT "10".
+    assert twak.calls == [
+        ["swap", "1000", "USDC", "0xCONTRACT", "--chain", "bsc", "--json"],
+    ]
+    # Booked qty still comes ONLY from the on-chain balance delta (95), not the quote.
+    assert positions.calls[0][1] == Decimal("95")
+
+
+def test_buy_swap_asserts_usdc_in_matches_quote(tmp_path):
+    # When the prepared quote carries usdc_in, it must equal quantity * entry.
+    twak = FakeTwak()
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("2000"), "token": Decimal("0")},
+        {"stable": Decimal("1000"), "token": Decimal("95")},
+    ])
+    positions = SpyPositions()
+    coord, _journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    result = coord.submit(
+        _intent(), quote={"price": "1", "usdc_in": "1000"},
+        policy=PolicyConfig(max_notional=1000.0),
+    )
+
+    assert result == "RECONCILED"
+    assert twak.calls[0][1] == "1000"
+
+
 def test_confirmed_and_reconciled_books_once_with_reconciled_qty(tmp_path):
     twak = FakeTwak()
     rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)

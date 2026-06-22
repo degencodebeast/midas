@@ -19,6 +19,7 @@ double-submits or double-books.
 
 import logging
 from dataclasses import asdict
+from decimal import Decimal
 
 from magic_agent.execution_journal import ExecutionState
 from magic_agent.reconcile import reconcile_buy
@@ -53,8 +54,18 @@ class ExecutionCoordinator:
         self.journal.transition(intent.intent_id, ExecutionState.EXECUTING)
         try:
             contract = self.registry.by_contract_key(intent.setup.identity_key).contract_address
+            # ``intent.quantity`` is a TOKEN qty; a BUY swap's SOURCE amount is USDC.
+            # Spend usdc_in = qty * entry USDC — the SAME amount the live quote provider
+            # priced (single source of truth: recompute, then assert the carried
+            # quote's usdc_in matches if present).
+            usdc_in = intent.quantity * intent.setup.entry
+            quoted_usdc_in = quote.get("usdc_in") if isinstance(quote, dict) else None
+            if quoted_usdc_in is not None:
+                assert Decimal(str(quoted_usdc_in)) == usdc_in, (
+                    f"quote usdc_in {quoted_usdc_in} != qty*entry {usdc_in}"
+                )
             payload = self.twak.json([
-                "swap", str(intent.quantity), "USDC", contract,
+                "swap", str(usdc_in), "USDC", contract,
                 "--chain", "bsc", "--json",
             ])
             tx_hash = payload.get("data", {}).get("tx_hash") or payload.get("tx_hash")
