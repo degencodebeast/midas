@@ -1282,7 +1282,7 @@ requires-dist = [
     { name = "bnbagent", marker = "extra == 'identity'", git = "https://github.com/bnb-chain/bnbagent-sdk?rev=8a65004c4969bb1f16feaa4adf4f422ac870cf10" },
     { name = "ccxt", marker = "extra == 'live'", specifier = ">=4.0" },
     { name = "fastapi", specifier = ">=0.137.1" },
-    { name = "magic-scanner", git = "file:///Users/degencodebeast/Projects/personal/trading/trading-scanner?rev=5f92552e8fdd688808e2709eefc176ab681b7f4f" },
+    { name = "magic-scanner", git = "https://github.com/degencodebeast/trading-scanner?rev=5f92552e8fdd688808e2709eefc176ab681b7f4f" },
     { name = "uvicorn", specifier = ">=0.49.0" },
 ]
 provides-extras = ["identity", "live"]
@@ -1296,7 +1296,7 @@ dev = [
 [[package]]
 name = "magic-scanner"
 version = "0.1.0"
-source = { git = "file:///Users/degencodebeast/Projects/personal/trading/trading-scanner?rev=5f92552e8fdd688808e2709eefc176ab681b7f4f#5f92552e8fdd688808e2709eefc176ab681b7f4f" }
+source = { git = "https://github.com/degencodebeast/trading-scanner?rev=5f92552e8fdd688808e2709eefc176ab681b7f4f#5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 dependencies = [
     { name = "ccxt" },
     { name = "kaleido" },

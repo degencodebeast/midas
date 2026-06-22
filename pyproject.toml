@@ -40,12 +40,11 @@ build-backend = "uv_build"
 [tool.uv.sources]
 # Scanner pinned to an IMMUTABLE rev so the resolved source can't drift under you
 # (a `branch =` ref floats to HEAD on every re-lock — a `rev =` sha does not).
-# NOTE: this is currently a machine-local `file://` source — it REQUIRES the sibling
-# `../trading-scanner` checkout and does NOT install standalone on a fresh VPS. Before
-# VPS/CI deploy, push 5f92552 and switch to
-# `git = "https://github.com/degencodebeast/trading-scanner"` at the same sha (public
-# repo, no token). Bump the sha deliberately to pick up scanner changes, then re-run `uv lock`.
-magic-scanner = { git = "file:///Users/degencodebeast/Projects/personal/trading/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
+# Deployable `git+https` pin: 5f92552 is published on the PUBLIC remote
+# (origin/build/scanner-contract), so `uv sync` resolves it standalone on a fresh VPS/CI
+# with no GitHub token. Bump the sha deliberately to pick up scanner changes, then re-run
+# `uv lock`. (For local editable dev, see the override note below — do NOT commit it.)
+magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 # Local-dev override (editable sibling scanner): do NOT commit this uncommented.
 # After `uv sync`, run `uv pip install -e ../trading-scanner` to point at the local
 # checkout, or temporarily swap the source above to:
