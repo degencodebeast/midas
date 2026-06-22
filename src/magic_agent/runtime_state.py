@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from typing import Any
 
 from magic_agent.risk_policy import PortfolioRiskState
 
@@ -40,6 +41,14 @@ _BOOL_FIELDS: tuple[str, ...] = (
     "reconciled_position",
     "canary_mode",
     "blocks_new_exposure",
+    "canary_completed",
+    "auto_promote_after_canary",
+)
+_OPTIONAL_STRING_FIELDS: tuple[str, ...] = (
+    "canary_intent_id",
+    "canary_reconciled_at",
+    "promotion_reason",
+    "normal_scoring_started_at",
 )
 
 
@@ -63,6 +72,13 @@ class RuntimeState:
     reconciled_position: bool = False
     canary_mode: bool = True
     blocks_new_exposure: bool = False
+    canary_completed: bool = False
+    canary_intent_id: str | None = None
+    canary_reconciled_at: str | None = None
+    promotion_reason: str | None = None
+    normal_scoring_started_at: str | None = None
+    cost_viability_evidence: dict[str, Any] | None = None
+    auto_promote_after_canary: bool = True
     # Live source for the open-position count, wired by ``build_app`` to the
     # position manager's reconcile book so a booked position is visible to the
     # next cycle's concurrency cap and a close/exit decrements it. Excluded from
@@ -117,6 +133,25 @@ class RuntimeState:
             reconciled_position=self.reconciled_position,
         )
 
+    def live_mode_state(self) -> dict:
+        """Project canary/scoring mode into the status/dashboard contract."""
+        if self.blocks_new_exposure:
+            mode = "halted_review"
+        elif self.canary_mode:
+            mode = "canary"
+        else:
+            mode = "normal_scoring"
+        return {
+            "mode": mode,
+            "canary_required": self.canary_mode,
+            "canary_completed": self.canary_completed,
+            "canary_intent_id": self.canary_intent_id,
+            "canary_reconciled_at": self.canary_reconciled_at,
+            "promotion_reason": self.promotion_reason,
+            "normal_scoring_started_at": self.normal_scoring_started_at,
+            "cost_viability_evidence": self.cost_viability_evidence,
+        }
+
     def as_dict(self) -> dict:
         """A JSON-serialisable mapping; Decimals are encoded as exact strings."""
         payload: dict = {name: str(getattr(self, name)) for name in _DECIMAL_FIELDS}
@@ -124,6 +159,9 @@ class RuntimeState:
             payload[name] = getattr(self, name)
         for name in _BOOL_FIELDS:
             payload[name] = getattr(self, name)
+        for name in _OPTIONAL_STRING_FIELDS:
+            payload[name] = getattr(self, name)
+        payload["cost_viability_evidence"] = self.cost_viability_evidence
         return payload
 
     @classmethod
@@ -133,5 +171,9 @@ class RuntimeState:
         for name in _INT_FIELDS:
             kwargs[name] = int(data[name])
         for name in _BOOL_FIELDS:
-            kwargs[name] = bool(data[name])
+            if name in data:
+                kwargs[name] = bool(data[name])
+        for name in _OPTIONAL_STRING_FIELDS:
+            kwargs[name] = data.get(name)
+        kwargs["cost_viability_evidence"] = data.get("cost_viability_evidence")
         return cls(**kwargs)
