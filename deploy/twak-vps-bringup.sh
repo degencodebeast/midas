@@ -12,6 +12,23 @@ echo "No real swaps. This script performs status checks and QUOTE-ONLY smoke onl
 : "${WALLET_ADDRESS:?export WALLET_ADDRESS for the already-registered BSC wallet}"
 : "${GOLD_CONTRACT:?export GOLD_CONTRACT for quote-only sell smoke}"
 
+# TWAK CLI requires a modern Node: @trustwallet/cli require()s an ESM module, which
+# throws ERR_REQUIRE_ESM on Debian/Ubuntu's DEFAULT Node 18 (`apt install nodejs`). It
+# works on Node >=20.19 (require(esm) backported) and on Node 22/24. Verified in
+# deploy/docker-smoke.sh. Fail closed here rather than crash mid-bring-up.
+if ! command -v node >/dev/null 2>&1; then
+  echo "ERROR: node not found. Install Node 24:" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs" >&2
+  exit 3
+fi
+NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+NODE_MINOR="$(node -p 'process.versions.node.split(".")[1]' 2>/dev/null || echo 0)"
+if [ "$NODE_MAJOR" -lt 20 ] || { [ "$NODE_MAJOR" -eq 20 ] && [ "$NODE_MINOR" -lt 19 ]; }; then
+  echo "ERROR: Node $(node --version) is too old — @trustwallet/cli throws ERR_REQUIRE_ESM on Node <20.19." >&2
+  echo "Install Node 24 (matches the tested setup):" >&2
+  echo "  curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs" >&2
+  exit 3
+fi
 node --version
 npm --version
 npm install -g @trustwallet/cli

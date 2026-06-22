@@ -325,7 +325,15 @@ Do not enable systemd or run autonomous live mode before this gate is complete.
 Prerequisites:
 
 - scanner dependency is a deployable git pin at `5f92552e8fdd688808e2709eefc176ab681b7f4f`
+- the VPS can clone the PRIVATE scanner: a read-only GitHub token is configured in git
+  (see Known limitation (d)) — a fresh box has no cached creds and `uv sync` fails closed
+- the VPS runs **Node >= 20.19** (Node 24 recommended, matching the tested local setup).
+  The distro default `apt install nodejs` (Node 18) CRASHES the TWAK CLI with
+  `ERR_REQUIRE_ESM` — install Node 24 via NodeSource:
+  `curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs`
 - `deploy/twak-vps-bringup.sh` has passed quote-only smoke on the VPS
+- a clean-Linux deploy smoke (`deploy/docker-smoke.sh`) has passed (proves the private
+  scanner clone + paper runtime + TWAK-on-Node-24 before the VPS)
 - TWAK wallet address matches `WALLET_ADDRESS`
 - BNB gas reserve and USDC/USDT trading capital are funded
 - kill-switch file path is known

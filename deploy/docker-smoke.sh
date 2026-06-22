@@ -74,15 +74,22 @@ docker run --rm -e GITHUB_TOKEN="$TOKEN" -v "$REPO_DIR":/src:ro "$IMAGE" bash -e
   echo "=== paper smoke (must exit 0) ==="
   uv run magic-agent run --executor paper --max-iters 1
 
-  echo "=== TWAK CLI install (best-effort, version only, no secrets) ==="
-  if apt-get install -y -qq nodejs npm >/dev/null 2>&1; then
-    if npm install -g @trustwallet/cli >/dev/null 2>&1; then
-      twak --version || echo "twak: installed but --version failed (verify on VPS)"
+  echo "=== TWAK CLI on Node 24 (distro Node 18 crashes the CLI with ERR_REQUIRE_ESM) ==="
+  # @trustwallet/cli require()s an ESM module. That throws ERR_REQUIRE_ESM on Debian's
+  # default Node 18, but WORKS on Node >=20.19 (require(esm) was backported there) and on
+  # Node 22/24. We install Node 24 to match the tested local setup (twak 0.19.1). The VPS
+  # MUST install Node >=20.19 too — never rely on the distro `apt install nodejs` (=18).
+  curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1
+  apt-get install -y -qq nodejs >/dev/null 2>&1
+  echo "node $(node --version 2>/dev/null) / npm $(npm --version 2>/dev/null)"
+  if npm install -g @trustwallet/cli >/dev/null 2>&1; then
+    if twak --version; then
+      echo "twak CLI runs on Node 20: OK (real auth/quote-only still needs VPS secrets)"
     else
-      echo "twak: npm install failed (non-fatal here; verify on VPS)"
+      echo "twak: --version FAILED even on Node 20 — investigate before VPS"
     fi
   else
-    echo "twak: node/npm unavailable in image (non-fatal here; verify on VPS)"
+    echo "twak: npm install failed (non-fatal here; verify on VPS)"
   fi
 
   echo "=== DOCKER FRESH-LINUX SMOKE: PASS ==="
