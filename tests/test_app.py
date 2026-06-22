@@ -636,6 +636,126 @@ def test_restarted_position_still_projects_real_entry_and_take_profit(tmp_path):
     assert position["take_profit"] == 120.0
 
 
+def _twak_env(monkeypatch):
+    for name in (
+        "TWAK_ACCESS_ID",
+        "TWAK_HMAC_SECRET",
+        "TWAK_WALLET_PASSWORD",
+        "BSC_RPC_URL",
+        "CMC_API_KEY",
+        "WALLET_ADDRESS",
+    ):
+        monkeypatch.setenv(name, "test-secret")
+
+
+def _live_after_entry_app(tmp_path, monkeypatch, *, sell_quote, twak_json=None):
+    """A twak-mode App ready to drive after_entry_submission with the REAL module
+    cost gate (cost_viability=None) and an injected live_sell_quote producer."""
+    from magic_agent.spot_models import ActionPurpose, SpotIntent
+
+    _twak_env(monkeypatch)
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=twak_json or (lambda args, timeout=60: {})),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+    )
+    # Use the REAL module cost gate (not the injected fake) so we exercise the
+    # buy_spread + sell_spread accounting.
+    app.cost_viability = None
+    # Narrative journaling is orthogonal to the cost-viability path under test.
+    app.agent_narrative = None
+    # Inject the live sell-quote producer under test.
+    app.live_sell_quote = sell_quote
+    setup = AuthorizedSetup.example(identity_key="zec-bsc")
+    intent = SpotIntent("intent-1", setup, Decimal("5"), "buy", ActionPurpose.STRATEGY)
+    risk = SimpleNamespace(risk_fraction=Decimal("0.0025"), final_qty=Decimal("5"))
+    return app, intent, risk
+
+
+# A buy quote with a SMALL spread (output 100, min 99.5 => 50 bps).
+def _buy_live_quote():
+    return {
+        "output_qty": "100",
+        "minimum_output": "99.5",
+        "price_impact": "0",
+    }
+
+
+def _sell_live_quote(min_output):
+    # Sell: output is USDC out, minimum_output is the min USDC out.
+    return {
+        "output_qty": "100",
+        "minimum_output": str(min_output),
+        "price_impact": "0",
+    }
+
+
+def test_live_after_entry_uses_real_sell_quote_not_duplicated_buy(tmp_path, monkeypatch):
+    # buy_spread = 50 bps; sell quote has its OWN spread (output 100, min 99.0 =>
+    # 100 bps). Round-trip = 50 + 100 = 150 bps == cap => cost-viable, PROMOTES.
+    # If the buy quote were DUPLICATED as the sell quote, the round-trip would be
+    # 50 + 50 = 100 bps too (still <=150) — so to PROVE we used the real sell quote,
+    # the evidence must show sell_spread_bps == "100.00", not "50.00".
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+    captured = {}
+
+    def sell_quote(intent):
+        captured["called"] = True
+        return _sell_live_quote("99.0")
+
+    app, intent, risk = _live_after_entry_app(tmp_path, monkeypatch, sell_quote=sell_quote)
+    app.state.canary_mode = True
+    app.state.auto_promote_after_canary = True
+
+    app.after_entry_submission(intent=intent, result="RECONCILED", quote=_buy_live_quote(), risk=risk, now=now)
+
+    assert captured.get("called") is True
+    ev = app.state.cost_viability_evidence
+    assert ev["buy_spread_bps"] == "50.00"
+    assert ev["sell_spread_bps"] == "100.00"  # the REAL sell leg, not 2x buy
+    assert ev["estimated_round_trip_cost_bps"] == "150.00"
+    assert app.state.canary_mode is False
+    assert app.state.promotion_reason == "canary_reconciled_cost_viable"
+
+
+def test_live_after_entry_too_wide_round_trip_stays_canary(tmp_path, monkeypatch):
+    # Sell spread is huge (output 100, min 90 => 1000 bps). Round-trip well over the
+    # 150 bps cap => cost_viability_failed, stays canary.
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+    app, intent, risk = _live_after_entry_app(
+        tmp_path, monkeypatch, sell_quote=lambda intent: _sell_live_quote("90"),
+    )
+    app.state.canary_mode = True
+    app.state.auto_promote_after_canary = True
+
+    app.after_entry_submission(intent=intent, result="RECONCILED", quote=_buy_live_quote(), risk=risk, now=now)
+
+    assert app.state.canary_mode is True
+    assert app.state.promotion_reason == "cost_viability_failed"
+
+
+def test_live_after_entry_missing_sell_quote_fails_closed(tmp_path, monkeypatch):
+    # The live sell quote can't be obtained (port error / rejected) => fail closed:
+    # do NOT promote, stay canary with a clear reason. A missing sell quote must
+    # NEVER auto-promote.
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+    app, intent, risk = _live_after_entry_app(
+        tmp_path, monkeypatch, sell_quote=lambda intent: None,
+    )
+    app.state.canary_mode = True
+    app.state.auto_promote_after_canary = True
+
+    app.after_entry_submission(intent=intent, result="RECONCILED", quote=_buy_live_quote(), risk=risk, now=now)
+
+    assert app.state.canary_mode is True
+    assert app.state.promotion_reason == "cost_viability_failed"
+
+
 def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatch):
     from types import SimpleNamespace
 

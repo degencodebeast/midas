@@ -125,8 +125,9 @@ def test_buy_quote_parses_real_schema_into_normalized_quote():
 
 def test_buy_quote_does_not_require_hallucinated_cost_fields():
     # The real response has none of gas_usd/fee_usd/expires_at/asset/network — yet
-    # a valid real payload must still be APPROVED.
-    twak = FakeTwak(_buy_payload())
+    # a valid real payload must still be APPROVED. quantity=1 token * entry(100) =>
+    # usdc_in=100, so the echoed input must be "100 USDC".
+    twak = FakeTwak(_buy_payload(input="100 USDC"))
     provider = _provider(twak)
 
     result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))
@@ -240,8 +241,68 @@ def test_buy_quote_fails_closed_on_non_finite_output(bad):
     assert result.quote is None
 
 
+def test_buy_quote_rejects_wrong_input_amount_echo():
+    # We sent usdc_in=1 (probe), but TWAK echoes back "2 USDC" — a wrong amount.
+    # FAIL CLOSED: a mismatched echo means a wrong route/amount; don't trust it.
+    twak = FakeTwak(_buy_payload(input="2 USDC"))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
+
+    assert result.approved is False
+    assert "input_mismatch" in result.reasons
+    assert result.quote is None
+
+
+def test_buy_quote_rejects_wrong_input_asset_echo():
+    # Correct amount but WRONG asset (USDT, not the USDC we sent).
+    twak = FakeTwak(_buy_payload(input="1 USDT"))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
+
+    assert result.approved is False
+    assert "input_mismatch" in result.reasons
+    assert result.quote is None
+
+
+def test_buy_quote_accepts_correct_input_echo():
+    # Correct echo ("1 USDC" for usdc_in=1) is approved.
+    twak = FakeTwak(_buy_payload(input="1 USDC"))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
+
+    assert result.approved is True
+    assert result.quote is not None
+
+
+def test_buy_quote_input_echo_compares_decimals_not_strings():
+    # "1.0 USDC" echoed for usdc_in=1 must NOT spuriously mismatch (Decimal compare).
+    twak = FakeTwak(_buy_payload(input="1.0 USDC"))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
+
+    assert result.approved is True
+    assert result.quote is not None
+
+
+def test_buy_quote_input_echo_case_insensitive_symbol():
+    # Symbol case must not matter ("usdc" == "USDC").
+    twak = FakeTwak(_buy_payload(input="1 usdc"))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), None)
+
+    assert result.approved is True
+    assert result.quote is not None
+
+
 def test_buy_quote_fails_closed_on_nonpositive_output():
-    twak = FakeTwak(_buy_payload(output="0 APE"))
+    # usdc_in = 1 token * entry(100) = 100, so the echo must be "100 USDC" to
+    # reach (not short-circuit before) the nonpositive-output check under test.
+    twak = FakeTwak(_buy_payload(input="100 USDC", output="0 APE"))
     provider = _provider(twak)
 
     result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))

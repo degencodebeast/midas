@@ -103,6 +103,44 @@ def test_sell_probe_and_execute_emit_real_commands_without_sell_flag():
     assert book[0].identity_key == "zec-bsc"
 
 
+class HashTwak:
+    """Execute returns a REAL-shaped sell response with a top-level ``hash``."""
+
+    def __init__(self):
+        self.calls = []
+
+    def json(self, args, *, timeout=60):
+        self.calls.append(args)
+        if "--quote-only" in args:
+            return _sell_quote_payload()
+        # Real executed sell: tx hash is the TOP-LEVEL "hash" field.
+        return {
+            "input": "1 APE",
+            "output": "0.138 USDC",
+            "minReceived": "0.137 USDC",
+            "provider": "LiquidMesh",
+            "priceImpact": "0",
+            "hash": "0x88b0deadbeef",
+            "fromChain": "bsc",
+            "toChain": "bsc",
+            "explorer": "https://bscscan.com/tx/0x88b0deadbeef",
+        }
+
+
+def test_sell_execute_returns_real_top_level_hash():
+    twak = HashTwak()
+    position = _position()
+    book = [position]
+    ports = _ports(twak, book)
+    decision = SimpleNamespace(exit_quantity=Decimal("2"))
+
+    tx_hash = ports.execute(position, decision, quote=None)
+
+    # The real sell tx hash is read from the top-level "hash" field, NOT lost
+    # to the "SUBMITTED" fallback.
+    assert tx_hash == "0x88b0deadbeef"
+
+
 def test_sell_full_close_removes_position_from_book():
     twak = FakeTwak()
     position = _position()
@@ -127,6 +165,23 @@ def test_sell_execute_leaves_book_untouched_if_sell_raises():
         ports.execute(position, decision, quote=None)
 
     assert book == [position]
+
+
+def test_sell_probe_returns_cost_viability_normalized_quote():
+    # The sell quote must be normalized to the SAME live shape cost_viability's
+    # LIVE branch consumes: output_qty (USDC out), minimum_output (min USDC),
+    # price_impact. For a SELL, output/minReceived are USDC -> the spread is the
+    # sell-leg slippage.
+    twak = FakeTwak()
+    ports = _ports(twak, [])
+
+    quote = ports.sell_probe(_position(), Decimal("1"))
+
+    assert quote.approved is True
+    assert quote.quote is not None
+    assert Decimal(str(quote.quote["output_qty"])) == Decimal("0.138910921981003559")
+    assert Decimal(str(quote.quote["minimum_output"])) == Decimal("0.137521812761193523")
+    assert Decimal(str(quote.quote["price_impact"])) == Decimal("0")
 
 
 def test_sell_probe_fails_closed_on_nonpositive_quantity():

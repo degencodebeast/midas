@@ -38,6 +38,26 @@ def _parse_amount(s: object) -> tuple[Decimal, str]:
     return value, symbol
 
 
+def _normalize_live_legs(payload: dict) -> tuple[Decimal, str, Decimal, Decimal]:
+    """Parse a twak quote payload into the live cost-viability legs.
+
+    Returns ``(output_qty, output_symbol, minimum_output, price_impact)``. For a
+    BUY the output is the target token; for a SELL it is USDC out — either way
+    ``cost_viability``'s LIVE branch costs the ``output_qty``/``minimum_output``
+    slippage spread the same way. Raises ``ValueError`` on any malformed field
+    (fail closed).
+    """
+    output_qty, output_symbol = _parse_amount(payload["output"])
+    minimum_output, _ = _parse_amount(payload["minReceived"])
+    try:
+        price_impact = Decimal(str(payload.get("priceImpact", "0")))
+    except (InvalidOperation, TypeError) as exc:
+        raise ValueError("malformed price_impact") from exc
+    if not price_impact.is_finite():
+        raise ValueError("non-finite price_impact")
+    return output_qty, output_symbol, minimum_output, price_impact
+
+
 class TwakQuoteProvider:
     """TWAK-backed quote provider matching prepare_exact_order's callable contract.
 
@@ -109,19 +129,21 @@ class TwakQuoteProvider:
         if reasons:
             return False, tuple(reasons), None
         try:
-            output_qty, output_symbol = _parse_amount(payload["output"])
-            minimum_output, _ = _parse_amount(payload["minReceived"])
-            _parse_amount(payload["input"])  # validate shape; value unused here
+            output_qty, output_symbol, minimum_output, price_impact = _normalize_live_legs(payload)
+            input_amount, input_symbol = _parse_amount(payload["input"])
         except ValueError:
             return False, ("malformed_amount",), None
+        # VERIFY the echo-back: TWAK echoes the input we sent. The parsed input
+        # AMOUNT must equal usdc_in and the SYMBOL must be the stable symbol
+        # (case-insensitive). A mismatch means a wrong route/asset/amount was
+        # priced — FAIL CLOSED rather than trust a quote for the wrong thing.
+        # Compare parsed Decimals (not raw strings) so "1" vs "1.0" don't mismatch.
+        if input_amount != usdc_in or input_symbol.upper() != self._stable_symbol.upper():
+            return False, ("input_mismatch",), None
         if output_qty <= 0:
             return False, ("nonpositive_output",), None
         if minimum_output <= 0:
             return False, ("nonpositive_minimum_output",), None
-        try:
-            price_impact = Decimal(str(payload.get("priceImpact", "0")))
-        except (InvalidOperation, TypeError):
-            return False, ("malformed_price_impact",), None
         quote = {
             "output_qty": str(output_qty),
             "output_symbol": output_symbol,

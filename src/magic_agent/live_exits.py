@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from decimal import Decimal
 
-from magic_agent.live_quotes import _parse_amount
+from magic_agent.live_quotes import _normalize_live_legs, _parse_amount
 
 
 @dataclass(frozen=True)
@@ -41,15 +41,29 @@ class TwakSellPorts:
         ])
         if not isinstance(payload, dict) or payload.get("error") is not None:
             return LiveSellQuote(False, None, ("twak_error",))
+        for field in ("output", "minReceived"):
+            if field not in payload:
+                return LiveSellQuote(False, None, (f"missing_{field}",))
         quote = dict(payload)
-        # Best-effort parse of the realized USDC output, when present.
-        output = payload.get("output")
-        if output is not None:
-            try:
-                usdc_out, _ = _parse_amount(output)
-                quote["output_qty"] = str(usdc_out)
-            except ValueError:
-                return LiveSellQuote(False, None, ("malformed_amount",))
+        # Normalize to the SAME live shape cost_viability's LIVE branch consumes
+        # (output_qty / minimum_output / price_impact). For a SELL, output and
+        # minReceived are USDC, so the (output_qty - minimum_output) spread is the
+        # sell-leg slippage. Fail closed on any malformed field.
+        try:
+            output_qty, _symbol, minimum_output, price_impact = _normalize_live_legs(payload)
+        except ValueError:
+            return LiveSellQuote(False, None, ("malformed_amount",))
+        if output_qty <= 0:
+            return LiveSellQuote(False, None, ("nonpositive_output",))
+        if minimum_output <= 0:
+            return LiveSellQuote(False, None, ("nonpositive_minimum_output",))
+        if price_impact != 0:
+            # cost_viability fails closed on nonzero price_impact (unit unconfirmed);
+            # mirror that here so a nonzero-impact sell quote never silently passes.
+            return LiveSellQuote(False, None, ("price_impact_unit_unconfirmed",))
+        quote["output_qty"] = str(output_qty)
+        quote["minimum_output"] = str(minimum_output)
+        quote["price_impact"] = str(price_impact)
         return LiveSellQuote(True, quote, ())
 
     def execute(self, position, decision, quote) -> str:
@@ -62,8 +76,14 @@ class TwakSellPorts:
             "swap", str(decision.exit_quantity), contract, self._stable_symbol,
             "--chain", self._chain, "--json",
         ])
+        # A REAL executed sell returns the tx hash in the TOP-LEVEL "hash" field
+        # (mirroring the coordinator's buy fix); the data.tx_hash / tx_hash shapes
+        # are legacy fallbacks before the "SUBMITTED" placeholder.
         tx_hash = (
-            payload.get("data", {}).get("tx_hash") or payload.get("tx_hash") or "SUBMITTED"
+            payload.get("hash")
+            or payload.get("data", {}).get("tx_hash")
+            or payload.get("tx_hash")
+            or "SUBMITTED"
         )
         # THEN mutate the book, mirroring PaperExitPorts.execute exactly: a
         # full-quantity exit removes the closed position; a partial reduction

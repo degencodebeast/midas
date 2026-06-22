@@ -259,6 +259,14 @@ class App:
     # observability and journaled when behind, never used to authorize/size/force a trade.
     qualification_config: QualificationConfig | None = None
     qualification_pace: dict | None = None
+    # LIVE-ONLY: produces a REAL token->USDC sell quote (normalized to the live
+    # cost-viability shape) for the just-reconciled canary position, so the
+    # round-trip cost uses buy_spread + the REAL sell_spread instead of double-
+    # counting the buy quote. ``None`` in paper (and on hand-built test Apps): the
+    # paper path duplicates the deterministic paper quote, which is harmless (gas/
+    # fee 0). A callable ``(intent) -> dict | None``; returning ``None`` means the
+    # live sell quote could not be obtained -> after_entry_submission fails closed.
+    live_sell_quote: Any = None
 
     def update_qualification_pace(self, now) -> None:
         """Recompute advisory minimum-trade-count pace. ADVISORY ONLY — it records a
@@ -373,9 +381,29 @@ class App:
                 _log.exception("agent narrative append failed (non-fatal)")
         if not self.state.canary_mode:
             return
+        # SELL QUOTE: in LIVE mode, the round-trip cost must use a REAL token->USDC
+        # sell quote for the just-reconciled position — NOT a duplicate of the BUY
+        # quote (which double-counts the per-leg spread and spuriously blocks
+        # promotion). PAPER keeps the existing behavior (the deterministic paper
+        # quote duplicated as buy+sell is harmless: gas/fee 0, fixed paper cost).
+        sell_quote = quote
+        if self.mode == "twak" and self.live_sell_quote is not None:
+            sell_quote = self.live_sell_quote(intent)
+            if sell_quote is None:
+                # The live sell quote could not be obtained (port error / rejected).
+                # FAIL CLOSED: never auto-promote without a real sell-leg cost.
+                self.state.canary_completed = True
+                self.state.canary_intent_id = intent.intent_id
+                self.state.canary_reconciled_at = now.isoformat()
+                self.state.cost_viability_evidence = {
+                    "approved": False,
+                    "denied_by": ("missing_sell_quote",),
+                }
+                self.state.promotion_reason = "cost_viability_failed"
+                return
         decision = self.evaluate_cost_viability(
             buy_quote=quote,
-            sell_quote=quote,
+            sell_quote=sell_quote,
             intended_risk_fraction=risk.risk_fraction,
             now=now,
         )
@@ -608,10 +636,32 @@ def build_app(
         live_sell_ports = TwakSellPorts(twak=live_twak, book=position_manager.book, registry=registry)
         position_manager.sell_probe = live_sell_ports.sell_probe
         position_manager.execute = live_sell_ports.execute
+
+        # Live canary cost-viability needs a REAL token->USDC sell quote for the
+        # just-reconciled position (token + realized qty), normalized to the live
+        # cost-viability shape (output_qty/minimum_output/price_impact). This closure
+        # locates the reconciled position in the open book by intent_id and probes a
+        # SELL of its realized qty. Returns None (fail closed) when the position is
+        # absent or the sell probe is rejected — after_entry_submission then refuses
+        # to auto-promote rather than trust a duplicated buy quote.
+        def _live_sell_quote(intent: Any) -> dict | None:
+            position = next(
+                (p for p in position_manager.book if p.intent_id == intent.intent_id),
+                None,
+            )
+            if position is None:
+                return None
+            probe = live_sell_ports.sell_probe(position, position.quantity)
+            if not probe.approved or probe.quote is None:
+                return None
+            return probe.quote
     else:
         executability = ExecutabilityAdapter(PaperQuoteProvider(now=_iso(state)))
         execution_port = paper_adapter
         execution_journal = paper_adapter
+        # PAPER: no real sell quote — after_entry_submission duplicates the
+        # deterministic paper quote (harmless: gas/fee 0, fixed paper cost).
+        _live_sell_quote = None
 
     return App(
         position_manager=position_manager,
@@ -638,6 +688,7 @@ def build_app(
         kill_switch_path=base / "HALT_NEW_ENTRIES",
         _chain_journal=chain_journal,
         agent_narrative=AgentNarrativeJournal(base / "agent_narrative.jsonl"),
+        live_sell_quote=_live_sell_quote,
     )
 
 
