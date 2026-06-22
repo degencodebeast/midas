@@ -56,7 +56,10 @@ if [ "${RUN_COMPETE_REGISTER:-0}" = "1" ]; then
   twak compete status --json
 fi
 
-twak swap 1 USDC "$WALLET_ADDRESS" --chain bsc --quote-only --json
-twak swap 1 "$GOLD_CONTRACT" "$WALLET_ADDRESS" --chain bsc --quote-only --sell --json
+# Quote-only smoke against the real twak 0.19.1 CLI. The swap token is the GOLD
+# CONTRACT (NOT the wallet address); a sell is the <from> <to> order token->USDC.
+# Never run a swap without --quote-only here.
+twak swap 1 USDC "$GOLD_CONTRACT" --chain bsc --quote-only --json
+twak swap 1 "$GOLD_CONTRACT" USDC --chain bsc --quote-only --json
 
 echo "TWAK quote-only bring-up complete. Live trading still requires operator approval."

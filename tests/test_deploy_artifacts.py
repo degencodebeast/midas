@@ -11,6 +11,12 @@ def test_twak_vps_bringup_is_quote_only_and_existing_wallet_safe():
     assert 'RUN_COMPETE_REGISTER:-0' in text
     assert "WALLET_ADDRESS" in text
     assert "No real swaps" in text
+    # Reconciled to the real twak 0.19.1 CLI: no invalid --sell flag, and the
+    # swap destination/source token is the GOLD CONTRACT, not the wallet address.
+    assert "--sell" not in text
+    assert 'swap 1 USDC "$GOLD_CONTRACT" --chain bsc --quote-only --json' in text
+    assert 'swap 1 "$GOLD_CONTRACT" USDC --chain bsc --quote-only --json' in text
+    assert 'swap 1 USDC "$WALLET_ADDRESS"' not in text
 
 
 def test_systemd_unit_is_disabled_skeleton_with_env_file():

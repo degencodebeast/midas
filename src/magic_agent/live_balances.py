@@ -6,29 +6,90 @@ from decimal import Decimal, InvalidOperation
 from magic_agent.twak import TwakError
 
 
+def _to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
+    if value is None:
+        return default
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        return default
+
+
 class TwakBalanceReader:
-    def __init__(self, *, twak, stable_symbol: str = "USDC", chain: str = "bsc") -> None:
+    """Reads ``wallet balance --chain bsc --json`` and projects the coordinator's
+    ``{"stable": Decimal, "token": Decimal}`` snapshot contract.
+
+    Reconciled to twak 0.19.1: there is NO per-token flag. The command returns
+    the native gas balance at the top level (``symbol``/``available``, e.g. BNB)
+    plus a ``tokens`` LIST. ``stable`` is the held USDC amount and ``token`` is the
+    held target-token amount, both derived from ``tokens[]`` (zero when absent —
+    an empty wallet is safe, not an error).
+    """
+
+    def __init__(self, *, twak, registry, stable_symbol: str = "USDC", chain: str = "bsc") -> None:
         self._twak = twak
+        self._registry = registry
         self._stable_symbol = stable_symbol
         self._chain = chain
 
-    def snapshot(self, identity_key: str) -> dict[str, Decimal]:
+    def snapshot(self, identity_key: str) -> dict:
         payload = self._twak.json([
             "wallet", "balance",
             "--chain", self._chain,
-            "--token", identity_key,
             "--json",
         ])
-        data = payload.get("data", payload)
-        result: dict[str, Decimal] = {}
-        for key in ("stable", "token"):
-            if key not in data:
-                raise TwakError(f"twak balance payload missing {key!r}")
-            try:
-                result[key] = Decimal(str(data[key]))
-            except (InvalidOperation, TypeError) as exc:
-                raise TwakError(f"twak balance payload has non-numeric {key!r}") from exc
-        return result
+        data = payload.get("data", payload) if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise TwakError("twak balance payload is not an object")
+        if data.get("error") is not None:
+            raise TwakError(f"twak balance reported error: {data.get('error')!r}")
+
+        target_contract = self._registry.by_contract_key(identity_key).contract_address
+
+        tokens = data.get("tokens")
+        if tokens is None:
+            tokens = []
+        if not isinstance(tokens, list):
+            raise TwakError("twak balance 'tokens' is not a list")
+
+        stable = self._extract_token_amount(tokens, symbol=self._stable_symbol, contract=None)
+        token = self._extract_token_amount(tokens, symbol=None, contract=target_contract)
+
+        return {
+            "stable": stable,
+            "token": token,
+            "native": _to_decimal(data.get("available")),
+            "native_symbol": str(data.get("symbol", "")),
+        }
+
+    def _extract_token_amount(self, tokens, *, symbol: str | None, contract: str | None) -> Decimal:
+        # NOTE: the exact field names of a POPULATED tokens[] entry are UNVERIFIED
+        # (the real wallet currently holds no tokens). This is a best-effort parser
+        # over the obvious candidate fields. Empty list -> zero (fail safe).
+        # TODO: confirm tokens[] entry schema against a real funded balance JSON.
+        for entry in tokens:
+            if not isinstance(entry, dict):
+                continue
+            entry_symbol = str(entry.get("symbol", "")).upper()
+            entry_contract = str(
+                entry.get("contractAddress") or entry.get("address") or ""
+            ).lower()
+            matched = False
+            if symbol is not None and entry_symbol == symbol.upper():
+                matched = True
+            if contract is not None and entry_contract == str(contract).lower():
+                matched = True
+            if not matched:
+                continue
+            raw = (
+                entry.get("amount")
+                if entry.get("amount") is not None
+                else entry.get("balance")
+                if entry.get("balance") is not None
+                else entry.get("available")
+            )
+            return _to_decimal(raw)
+        return Decimal("0")
 
 
 @dataclass

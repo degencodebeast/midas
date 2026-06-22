@@ -583,9 +583,10 @@ def build_app(
             rpc_url=os.environ["BSC_RPC_URL"],
             wallet_address=wallet_address,
         )
-        balances = live_balances or TwakBalanceReader(twak=live_twak)
+        balances = live_balances or TwakBalanceReader(twak=live_twak, registry=registry)
         quote_provider = TwakQuoteProvider(
             twak=live_twak,
+            registry=registry,
             wallet_address=wallet_address,
             stable_symbol="USDC",
             chain="bsc",
@@ -604,7 +605,7 @@ def build_app(
         # Live protective exits: real TWAK sells. Detection (observe) stays
         # price-driven via the live frame source; only the sell quote/execute
         # are swapped to the real TWAK sell ports.
-        live_sell_ports = TwakSellPorts(twak=live_twak, book=position_manager.book)
+        live_sell_ports = TwakSellPorts(twak=live_twak, book=position_manager.book, registry=registry)
         position_manager.sell_probe = live_sell_ports.sell_probe
         position_manager.execute = live_sell_ports.execute
     else:
