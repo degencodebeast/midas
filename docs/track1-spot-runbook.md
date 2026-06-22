@@ -303,3 +303,59 @@ Do NOT retry. Check the BSC explorer for the transaction hash recorded in
 `execution_journal`. If confirmed: manually reconcile and update `state_journal`.
 If not found: treat as not broadcast and clear the record after operator review.
 BROADCAST_UNKNOWN blocks all new exposure until resolved.
+
+---
+
+## Supervised live canary gate
+
+Do not enable systemd or run autonomous live mode before this gate is complete.
+
+Prerequisites:
+
+- scanner dependency is a deployable git pin at `5f92552e8fdd688808e2709eefc176ab681b7f4f`
+- `deploy/twak-vps-bringup.sh` has passed quote-only smoke on the VPS
+- TWAK wallet address matches `WALLET_ADDRESS`
+- BNB gas reserve and USDC/USDT trading capital are funded
+- kill-switch file path is known
+- operator approval is explicit for the first live canary
+
+Canary observation sequence:
+
+1. Start with `magic-agent run --executor twak --max-iters 1` under direct operator supervision.
+2. Confirm a scanner-authorized setup exists.
+3. Confirm RiskPolicy caps the first live entry to `canary_risk_fraction = 0.0025`.
+4. Confirm TWAK quote is fresh and exact-size.
+5. Confirm TWAK submit returns a transaction hash.
+6. Confirm the chain receipt reaches the required confirmations.
+7. Confirm balance-delta reconciliation books the position.
+8. Confirm the position appears in status and journals as confirmed and reconciled.
+
+If any step fails, stop autonomous activation. Do not promote to normal scoring mode.
+
+### Known live-execution gaps (must close before funded/autonomous live)
+
+The Phase 0 live wiring is fail-closed but incomplete. The supervised quote-only
+smoke above is safe (no funds move), but the following MUST be closed before any
+funded or unsupervised live run, and the systemd unit MUST stay disabled until then:
+
+1. Real BSC RPC client. `build_app(mode="twak")` defaults the receipt/confirmation
+   port to `_FailClosedLiveRpc` (reports status `0x0` / zero confirmations), which by
+   design cannot reconcile a swap into a booked position. A real BSC RPC client that
+   reads `BSC_RPC_URL` (transaction receipt + confirmation depth) MUST be built and
+   injected as `live_rpc` before a funded canary can book.
+2. Coordinator post-swap balance read. The post-broadcast balance snapshot in the
+   execution coordinator is outside the broadcast try/except; a malformed balance read
+   after a real swap must be mapped to a fail-closed terminal state (blocks new
+   exposure) rather than crashing the cycle.
+3. Live sell idempotency. The TWAK sell path has no execution-journal idempotency
+   record; a sell broadcast whose response is lost must map to a safe terminal state
+   so a protective exit is not re-broadcast on the next cycle.
+4. Chain-truth restart rebuild. Live restart still loads the paper position store;
+   before unsupervised live operation, open-position truth must be rebuilt from
+   reconciled execution evidence + chain balances (`rebuild_positions_from_chain`)
+   instead of `positions.json`, so a restart cannot re-enter a position already held
+   on-chain.
+
+Until all four are closed, operate only the supervised quote-only smoke and a single
+operator-watched canary; do not enable systemd (keep the unit disabled) and do not
+run autonomously.
