@@ -54,6 +54,7 @@ from magic_agent.execution_coordinator import ExecutionCoordinator
 from magic_agent.execution_journal import ExecutionJournal, ExecutionState
 from magic_agent.frames import FixtureFrameSource, GateioFrameSource
 from magic_agent.live_balances import TwakBalanceReader
+from magic_agent.live_exits import TwakSellPorts
 from magic_agent.live_quotes import TwakQuoteProvider
 from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
@@ -525,6 +526,12 @@ def build_app(
             registry=registry,
         )
         execution_journal = _LiveExecutionView(chain_journal)
+        # Live protective exits: real TWAK sells. Detection (observe) stays
+        # price-driven via the live frame source; only the sell quote/execute
+        # are swapped to the real TWAK sell ports.
+        live_sell_ports = TwakSellPorts(twak=live_twak)
+        position_manager.sell_probe = live_sell_ports.sell_probe
+        position_manager.execute = live_sell_ports.execute
     else:
         executability = ExecutabilityAdapter(PaperQuoteProvider(now=_iso(state)))
         execution_port = paper_adapter
