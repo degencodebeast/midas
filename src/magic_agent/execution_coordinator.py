@@ -69,7 +69,10 @@ class ExecutionCoordinator:
                 "swap", str(usdc_in), "USDC", contract,
                 "--chain", "bsc", "--json",
             ])
-            tx_hash = payload.get("data", {}).get("tx_hash") or payload.get("tx_hash")
+            # A REAL executed swap returns the tx hash in the TOP-LEVEL "hash" field
+            # (no success/data wrapper). Prefer it; keep back-compat with the older
+            # data.tx_hash / tx_hash shapes.
+            tx_hash = payload.get("hash") or payload.get("data", {}).get("tx_hash") or payload.get("tx_hash")
             if not tx_hash:
                 raise TwakError("swap response missing transaction hash")
         except Exception as exc:

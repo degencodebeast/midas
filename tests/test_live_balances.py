@@ -73,23 +73,83 @@ def test_empty_tokens_returns_zero_stable_and_token_safely():
     assert snapshot["native_symbol"] == "BNB"
 
 
-@pytest.mark.skip(reason="tokens[] entry schema UNVERIFIED pending a real funded balance JSON")
+# REAL twak 0.19.1 populated `wallet balance --chain bsc --json`: each tokens[]
+# entry is {"symbol","contract","balance"}. BSC USDC contract verified below.
+_BSC_USDC = "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d"
+
+
+def _populated_payload():
+    return {
+        "chain": "bsc",
+        "address": "0xFC30FA0956e26deBB273eBCb5b74bcDB21e138C6",
+        "symbol": "BNB",
+        "available": "0.0176629434",
+        "total": "0.0176629434",
+        "totalUsd": 10.62,
+        "tokens": [
+            {
+                "symbol": "USDC",
+                "contract": "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+                "balance": "10.034925928487288539",
+            }
+        ],
+    }
+
+
 def test_populated_tokens_extracts_stable_and_target():
-    # PENDING: the exact field names of a populated tokens[] entry are unverified.
-    # When a funded balance JSON is captured, confirm symbol/contract + amount fields
-    # and enable this. The parser is best-effort against obvious field names.
-    payload = _empty_tokens_payload()
-    payload["tokens"] = [
-        {"symbol": "USDC", "balance": "1000"},
-        {"symbol": "APE", "contractAddress": _APE, "balance": "3.5"},
-    ]
+    # REAL captured funded balance: stable (USDC) matched by SYMBOL, target matched
+    # by CONTRACT address, quantity read from "balance".
+    payload = _populated_payload()
+    # Add the target token matched by its contract (registry maps "zec-bsc" -> _APE).
+    payload["tokens"].append(
+        {"symbol": "APE", "contract": _APE, "balance": "3.5"}
+    )
     twak = FakeTwak(payload)
     reader = _reader(twak)
 
     snapshot = reader.snapshot("zec-bsc")
 
-    assert snapshot["stable"] == Decimal("1000")
+    assert snapshot["stable"] == Decimal("10.034925928487288539")
     assert snapshot["token"] == Decimal("3.5")
+
+
+def test_target_token_matched_by_contract_case_insensitive():
+    payload = _populated_payload()
+    payload["tokens"].append(
+        {"symbol": "APE", "contract": _APE.lower(), "balance": "7.25"}
+    )
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    snapshot = reader.snapshot("zec-bsc")
+
+    assert snapshot["token"] == Decimal("7.25")
+
+
+def test_token_absent_from_tokens_returns_zero_for_that_side():
+    # USDC held but the target token is NOT held -> token side is zero (not-held safe).
+    payload = _populated_payload()
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    snapshot = reader.snapshot("zec-bsc")
+
+    assert snapshot["stable"] == Decimal("10.034925928487288539")
+    assert snapshot["token"] == Decimal("0")
+
+
+def test_malformed_balance_fails_closed():
+    payload = _populated_payload()
+    payload["tokens"] = [
+        {"symbol": "USDC", "contract": _BSC_USDC, "balance": "not-a-number"}
+    ]
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    from magic_agent.twak import TwakError
+
+    with pytest.raises(TwakError):
+        reader.snapshot("zec-bsc")
 
 
 def test_static_rpc_client_waits_and_counts_confirmations():

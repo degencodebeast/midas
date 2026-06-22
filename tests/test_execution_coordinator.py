@@ -277,8 +277,44 @@ def test_broadcast_unknown_on_twak_error_books_nothing_and_blocks(tmp_path):
     assert journal.get("intent-1").state is ExecutionState.BROADCAST_UNKNOWN
 
 
+def test_real_execute_response_hash_field_is_extracted_and_reconciles(tmp_path):
+    # A REAL executed twak swap (WITHOUT --quote-only) returns the tx hash in the
+    # TOP-LEVEL "hash" field -- NOT tx_hash, NOT data.tx_hash, and with NO
+    # success/data wrapper. The coordinator must read "hash" and proceed to the
+    # receipt/reconcile path, never falsely flagging BROADCAST_UNKNOWN.
+    real_hash = "0x88b0049f764321337ea7a85f94a440706ceea1ee1eee14058c6a6c520cbbaf5b"
+    twak = FakeTwak(payload={
+        "input": "0.0167 BNB",
+        "output": "10.039254902866404567 USDC",
+        "minReceived": "9.938862353837740521 USDC",
+        "provider": "0x",
+        "priceImpact": "0",
+        "hash": real_hash,
+        "fromChain": "bsc",
+        "toChain": "bsc",
+        "explorer": f"https://bscscan.com/tx/{real_hash}",
+    })
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("100"), "token": Decimal("0")},
+        {"stable": Decimal("5"), "token": Decimal("95")},
+    ])
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    result = coord.submit(_intent(), quote={"price": "1"}, policy=PolicyConfig(max_notional=1000.0))
+
+    # The real "hash" is extracted -> proceeds to receipt/reconcile, NOT BROADCAST_UNKNOWN.
+    assert result == "RECONCILED"
+    record = journal.get("intent-1")
+    assert record.evidence.get("tx_hash") == real_hash
+    assert record.state is ExecutionState.RECONCILED
+    assert positions.calls[0][1] == Decimal("95")
+
+
 def test_missing_tx_hash_is_broadcast_unknown(tmp_path):
-    twak = FakeTwak(payload={"data": {}})
+    # A response with NEITHER "hash" NOR "tx_hash" must still fail closed.
+    twak = FakeTwak(payload={"input": "0.0167 BNB", "output": "10 USDC"})
     rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
     balances = FakeBalances([
         {"stable": Decimal("100"), "token": Decimal("0")},

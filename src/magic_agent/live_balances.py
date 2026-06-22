@@ -63,17 +63,16 @@ class TwakBalanceReader:
         }
 
     def _extract_token_amount(self, tokens, *, symbol: str | None, contract: str | None) -> Decimal:
-        # NOTE: the exact field names of a POPULATED tokens[] entry are UNVERIFIED
-        # (the real wallet currently holds no tokens). This is a best-effort parser
-        # over the obvious candidate fields. Empty list -> zero (fail safe).
-        # TODO: confirm tokens[] entry schema against a real funded balance JSON.
+        # A populated tokens[] entry is {"symbol", "contract", "balance"} (verified
+        # against a real funded BSC balance). Match by symbol (case-insensitive) OR
+        # contract (case-insensitive address), and read the quantity from "balance".
+        # A token absent from tokens[] -> Decimal("0") (not-held / empty wallet safe);
+        # a malformed/non-numeric "balance" fails CLOSED (raises).
         for entry in tokens:
             if not isinstance(entry, dict):
                 continue
             entry_symbol = str(entry.get("symbol", "")).upper()
-            entry_contract = str(
-                entry.get("contractAddress") or entry.get("address") or ""
-            ).lower()
+            entry_contract = str(entry.get("contract", "")).lower()
             matched = False
             if symbol is not None and entry_symbol == symbol.upper():
                 matched = True
@@ -81,14 +80,13 @@ class TwakBalanceReader:
                 matched = True
             if not matched:
                 continue
-            raw = (
-                entry.get("amount")
-                if entry.get("amount") is not None
-                else entry.get("balance")
-                if entry.get("balance") is not None
-                else entry.get("available")
-            )
-            return _to_decimal(raw)
+            raw = entry.get("balance")
+            try:
+                return Decimal(str(raw))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                raise TwakError(
+                    f"twak balance token has non-numeric balance {raw!r}"
+                ) from exc
         return Decimal("0")
 
 
