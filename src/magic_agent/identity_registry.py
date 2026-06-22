@@ -6,7 +6,6 @@ from pathlib import Path
 @dataclass(frozen=True)
 class IdentityRecord:
     competition_symbol: str
-    cmc_id: int
     chain_id: int
     contract_address: str
     decimals: int
@@ -17,6 +16,11 @@ class IdentityRecord:
     verification_status: str
     verified_at: str
     sources: tuple[str, ...]
+    # cmc_id is OPTIONAL: a record may exist with only symbol + contract. The live
+    # CMC client now reads the cmc_id from the CMC response (resolved by symbol +
+    # contract), so it is no longer required as registry input. When present (>0)
+    # it can be used to tighten disambiguation.
+    cmc_id: int | None = None
 
 
 class IdentityRegistry:
@@ -30,7 +34,13 @@ class IdentityRegistry:
     @classmethod
     def load(cls, path: str | Path) -> "IdentityRegistry":
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls([IdentityRecord(**{**row, "sources": tuple(row["sources"])}) for row in raw])
+        records = []
+        for row in raw:
+            # cmc_id is optional: a missing key or explicit null both mean "no id".
+            normalized = {**row, "sources": tuple(row["sources"])}
+            normalized.setdefault("cmc_id", None)
+            records.append(IdentityRecord(**normalized))
+        return cls(records)
 
     def by_symbol(self, symbol: str) -> IdentityRecord:
         return self._symbols[symbol]
@@ -40,6 +50,14 @@ class IdentityRegistry:
 
     def by_contract(self, address: str) -> IdentityRecord:
         return self._contracts[address.lower()]
+
+    def get_by_contract(self, address: str) -> IdentityRecord | None:
+        """Case-insensitive contract -> record lookup (None when unknown).
+
+        Used by the live CMC client to disambiguate single-ticker collisions by
+        matching a CMC entry's BSC ``platform.token_address`` to a registry record.
+        """
+        return self._contracts.get(address.lower())
 
     def by_contract_key(self, identity_key: str) -> IdentityRecord:
         return self._identity_keys[identity_key]

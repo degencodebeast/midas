@@ -113,11 +113,20 @@ class CoinMarketCapClient:
     """LIVE, read-only CMC adapter — drop-in for :class:`FixtureCmcClient`.
 
     Same ``fetch(*, symbols, observed_at) -> tuple[RawCmcQuote, ...]`` port. It
-    resolves the requested competition symbols to CMC **ids** via the identity
-    registry (NOT symbols — symbols collide across listings), batches them into
-    ONE ``GET /v2/cryptocurrency/quotes/latest?id=<comma>&convert=USD`` call with
-    the ``X-CMC_PRO_API_KEY`` header, and normalizes
-    ``data[id].quote.USD.percent_change_7d/30d`` into :class:`RawCmcQuote`.
+    resolves the requested competition symbols to their registry identity (SYMBOL
+    + BSC CONTRACT ADDRESS), batches them into ONE
+    ``GET /v2/cryptocurrency/quotes/latest?symbol=<comma>&convert=USD&aux=platform``
+    call with the ``X-CMC_PRO_API_KEY`` header, and normalizes
+    ``quote.USD.percent_change_7d/30d`` into :class:`RawCmcQuote`.
+
+    DISAMBIGUATION (load-bearing): when queried by symbol, CMC keys ``data`` by
+    SYMBOL and maps each to a LIST of matching coins (single-ticker collisions —
+    e.g. "B", "M", "H", "Q", "U"). The right coin is selected by matching its BSC
+    ``platform.token_address`` against the registry record's ``contract_address``
+    (case-insensitive). A symbol whose contract matches NO entry is OMITTED — never
+    guessed. If the registry record has a positive ``cmc_id`` it tightens the match
+    further (id must also agree). A single match with no registry contract is used
+    as-is. ``cmc_id`` is READ from the matched CMC entry, never required as input.
 
     AUTHORITY: this client only supplies rank/momentum (observe / veto / clamp
     inputs). It carries NO setup-authorizing role — the scanner remains the sole
@@ -127,8 +136,9 @@ class CoinMarketCapClient:
     FAIL-SOFT (load-bearing): it NEVER raises into the trade path and NEVER
     fabricates a momentum value. On HTTP error / non-200 / CMC
     ``status.error_code != 0`` / parse failure it returns what it can (empty on a
-    total failure) and lets the caller journal ``cmc_unavailable``; a requested id
-    absent from a good response is simply omitted (caller journals ``cmc_missing``).
+    total failure) and lets the caller journal ``cmc_unavailable``; a requested
+    symbol absent from a good response, or one no entry's contract disambiguates,
+    is simply omitted (caller journals ``cmc_missing``).
     """
 
     def __init__(
@@ -158,23 +168,24 @@ class CoinMarketCapClient:
         self, *, symbols: tuple[str, ...], observed_at: datetime
     ) -> tuple[RawCmcQuote, ...]:
         """Return live quotes for the resolvable ``symbols`` (fail-soft)."""
-        # Resolve symbols -> CMC ids via the registry. A symbol with no registry id
-        # cannot be queried by id and is dropped here (the caller journals it as
-        # cmc_missing once it is absent from the snapshot). Keep an id -> symbol map
-        # so the response (keyed by id) normalizes back to the competition symbol.
-        id_to_symbol: dict[int, str] = {}
+        # Resolve symbols -> registry identity (symbol + contract [+ optional id]).
+        # A symbol with no registry record cannot be disambiguated and is dropped
+        # here (the caller journals it as cmc_missing once absent from the snapshot).
+        # Keep an ordered symbol -> identity map; CMC is queried BY SYMBOL and the
+        # collision among matches is resolved by contract, not by guessing.
+        resolved: dict[str, Any] = {}
         for symbol in symbols:
             record = self._registry.get_by_symbol(symbol)
-            cmc_id = getattr(record, "cmc_id", None) if record is not None else None
-            if cmc_id is None:
+            if record is None:
                 continue
-            id_to_symbol.setdefault(int(cmc_id), symbol)
-        if not id_to_symbol:
+            resolved.setdefault(symbol, record)
+        if not resolved:
             # Nothing resolvable -> nothing to query (no point spending a credit).
             return ()
 
-        ids = ",".join(str(cmc_id) for cmc_id in id_to_symbol)
-        query = urllib.parse.urlencode({"id": ids, "convert": "USD"})
+        query = urllib.parse.urlencode(
+            {"symbol": ",".join(resolved), "convert": "USD", "aux": "platform"}
+        )
         url = f"{self._base_url}{_CMC_QUOTES_PATH}?{query}"
         headers = {
             "X-CMC_PRO_API_KEY": self._api_key,
@@ -190,10 +201,58 @@ class CoinMarketCapClient:
             _log.warning("CMC quotes fetch failed (transport); returning empty", exc_info=True)
             return ()
 
-        return self._normalize(payload, id_to_symbol)
+        return self._normalize(payload, resolved)
+
+    @staticmethod
+    def _entry_contract(entry: dict) -> str | None:
+        """Return the chain ``platform.token_address`` for a CMC coin entry, if any."""
+        platform = entry.get("platform")
+        if not isinstance(platform, dict):
+            return None
+        token_address = platform.get("token_address")
+        return token_address if isinstance(token_address, str) else None
+
+    @classmethod
+    def _select_match(cls, matches: list, record: Any) -> dict | None:
+        """Pick the one CMC coin that IS this registry identity (or None).
+
+        Disambiguation order:
+          * by contract: the entry whose BSC ``platform.token_address`` equals the
+            registry ``contract_address`` (case-insensitive) — and, if the registry
+            also carries a positive ``cmc_id``, the entry's id must agree;
+          * else (registry has no contract) a single match is taken as-is;
+          * else (collision with no contract / no disambiguator) -> None (omit).
+        Never guesses among colliding symbols.
+        """
+        coins = [m for m in matches if isinstance(m, dict)]
+        contract = getattr(record, "contract_address", None)
+        cmc_id = getattr(record, "cmc_id", None)
+
+        if contract:
+            want = contract.lower()
+            contract_hits = [
+                c for c in coins
+                if (cls._entry_contract(c) or "").lower() == want
+            ]
+            if cmc_id:
+                contract_hits = [
+                    c for c in contract_hits if c.get("id") == cmc_id
+                ]
+            if len(contract_hits) == 1:
+                return contract_hits[0]
+            return None
+
+        # No registry contract to disambiguate by. If the registry carries a cmc_id,
+        # use it to pick; otherwise only an unambiguous single match is acceptable.
+        if cmc_id:
+            id_hits = [c for c in coins if c.get("id") == cmc_id]
+            return id_hits[0] if len(id_hits) == 1 else None
+        if len(coins) == 1:
+            return coins[0]
+        return None
 
     def _normalize(
-        self, payload: Any, id_to_symbol: dict[int, str]
+        self, payload: Any, resolved: dict[str, Any]
     ) -> tuple[RawCmcQuote, ...]:
         """Parse a CMC response into RawCmcQuotes; fail soft on any bad shape."""
         if not isinstance(payload, dict):
@@ -212,12 +271,20 @@ class CoinMarketCapClient:
             return ()
 
         quotes: list[RawCmcQuote] = []
-        for cmc_id, requested_symbol in id_to_symbol.items():
-            # CMC keys the data map by stringified id; a requested id absent from
-            # the response is OMITTED (caller journals cmc_missing), not invented.
-            entry = data.get(str(cmc_id))
-            if not isinstance(entry, dict):
+        for requested_symbol, record in resolved.items():
+            # CMC keys the data map by SYMBOL -> LIST of colliding coins. A requested
+            # symbol absent from the response is OMITTED (caller journals cmc_missing).
+            raw_matches = data.get(requested_symbol)
+            if isinstance(raw_matches, dict):
+                # Defensive: a single-match symbol may arrive as a bare object.
+                raw_matches = [raw_matches]
+            if not isinstance(raw_matches, list):
                 continue
+            entry = self._select_match(raw_matches, record)
+            if entry is None:
+                # No contract-disambiguated match -> omit (caller journals cmc_missing).
+                continue
+
             quote_usd = entry.get("quote", {})
             if isinstance(quote_usd, dict):
                 quote_usd = quote_usd.get("USD", {})
@@ -228,8 +295,11 @@ class CoinMarketCapClient:
             # NEVER fabricate momentum: a missing field -> omit this entry.
             if p7 is None or p30 is None:
                 continue
-            # Normalize to the competition symbol (the registry resolved id->symbol);
-            # fall back to the API symbol only if the request map lost it.
-            symbol = requested_symbol or str(entry.get("symbol", ""))
-            quotes.append(RawCmcQuote(int(cmc_id), symbol, str(p7), str(p30)))
+            # cmc_id is READ from the matched CMC entry (not required as input).
+            cmc_id = entry.get("id")
+            if cmc_id is None:
+                continue
+            quotes.append(
+                RawCmcQuote(int(cmc_id), requested_symbol, str(p7), str(p30))
+            )
         return tuple(quotes)
