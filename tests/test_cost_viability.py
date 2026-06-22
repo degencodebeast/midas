@@ -153,19 +153,21 @@ def test_cost_viability_denies_too_wide_live_spread():
     assert decision.denied_by == ("round_trip_cost_too_high",)
 
 
-def test_cost_viability_live_quote_with_priceimpact_adds_to_spread():
-    # priceImpact treated as a PERCENT -> bps = price_impact * 100. "1" -> 100 bps/leg.
+def test_cost_viability_live_quote_nonzero_priceimpact_fails_closed():
+    # The live twak quote's priceImpact UNIT is unconfirmed (only a "0" sample seen).
+    # Guessing it is percent could understate impact 100x if it is a fraction. Until a
+    # real non-zero-impact quote pins the unit, ANY nonzero priceImpact must FAIL CLOSED
+    # regardless of how generous the cap or how tight the spread is.
     decision = evaluate_cost_viability(
-        buy_quote=_live_quote(price_impact="1"),
-        sell_quote=_live_quote(price_impact="1"),
+        buy_quote=_live_quote(price_impact="0.5"),
+        sell_quote=_live_quote(price_impact="0.5"),
         intended_risk_fraction=Decimal("0.005"),
         now="2026-06-22T12:00:00Z",
-        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("1000")),
+        config=CostViabilityConfig(max_round_trip_cost_bps=Decimal("100000")),
     )
 
-    rt = Decimal(decision.evidence["estimated_round_trip_cost_bps"])
-    # ~200 (spread) + ~200 (2 legs * 100 bps impact) ~= 400 bps.
-    assert Decimal("380") < rt < Decimal("420")
+    assert decision.approved is False
+    assert any("price_impact_unit_unconfirmed" in d for d in decision.denied_by), decision.denied_by
 
 
 def test_cost_viability_live_quote_not_denied_for_missing_expires_at():

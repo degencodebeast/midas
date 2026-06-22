@@ -56,14 +56,15 @@ class ExecutionCoordinator:
             contract = self.registry.by_contract_key(intent.setup.identity_key).contract_address
             # ``intent.quantity`` is a TOKEN qty; a BUY swap's SOURCE amount is USDC.
             # Spend usdc_in = qty * entry USDC — the SAME amount the live quote provider
-            # priced (single source of truth: recompute, then assert the carried
-            # quote's usdc_in matches if present).
+            # priced (single source of truth: recompute, then verify the carried
+            # quote's usdc_in matches if present). This is an explicit raise, NOT an
+            # assert: asserts are stripped under ``python -O`` and a money-safety
+            # invariant must survive that. The raise stays inside this try so a
+            # mismatch maps to BROADCAST_UNKNOWN before any swap is broadcast.
             usdc_in = intent.quantity * intent.setup.entry
             quoted_usdc_in = quote.get("usdc_in") if isinstance(quote, dict) else None
-            if quoted_usdc_in is not None:
-                assert Decimal(str(quoted_usdc_in)) == usdc_in, (
-                    f"quote usdc_in {quoted_usdc_in} != qty*entry {usdc_in}"
-                )
+            if quoted_usdc_in is not None and Decimal(str(quoted_usdc_in)) != usdc_in:
+                raise TwakError(f"quote usdc_in {quoted_usdc_in} != qty*entry {usdc_in}")
             payload = self.twak.json([
                 "swap", str(usdc_in), "USDC", contract,
                 "--chain", "bsc", "--json",

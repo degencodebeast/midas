@@ -163,6 +163,31 @@ def test_buy_swap_asserts_usdc_in_matches_quote(tmp_path):
     assert twak.calls[0][1] == "1000"
 
 
+def test_buy_swap_mismatched_usdc_in_is_broadcast_unknown_and_books_nothing(tmp_path):
+    # When the prepared quote carries a usdc_in that does NOT equal quantity * entry,
+    # the money-safety invariant must fail closed BEFORE any swap is broadcast: no twak
+    # call, no booking, terminal BROADCAST_UNKNOWN. (This must hold even under python -O,
+    # so it is an explicit raise, not an assert.)
+    twak = FakeTwak()
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("2000"), "token": Decimal("0")},
+        {"stable": Decimal("1000"), "token": Decimal("95")},
+    ])
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    result = coord.submit(
+        _intent(), quote={"price": "1", "usdc_in": "999"},
+        policy=PolicyConfig(max_notional=1000.0),
+    )
+
+    assert result == "BROADCAST_UNKNOWN"
+    assert twak.calls == []  # no swap broadcast
+    assert positions.calls == []  # nothing booked
+    assert journal.get("intent-1").state is ExecutionState.BROADCAST_UNKNOWN
+
+
 def test_confirmed_and_reconciled_books_once_with_reconciled_qty(tmp_path):
     twak = FakeTwak()
     rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)

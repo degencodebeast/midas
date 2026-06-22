@@ -120,13 +120,17 @@ def _validate_paper(
 
 def _validate_live(name: str, quote: dict, denied: list[str]) -> dict[str, Decimal]:
     # SPREAD-ONLY policy: the real CLI returns no gas/fee/notional, so we cannot
-    # compute fixed (USD) cost. We charge the slippage spread plus priceImpact.
+    # compute fixed (USD) cost. The (output_qty - minimum_output)/output_qty slippage
+    # spread is unambiguous and reliable, so we cost on that.
     #
-    # priceImpact UNIT ASSUMPTION: the sample value is "0", which gives no signal
-    # about the unit. We treat priceImpact as a PERCENT (e.g. "1" -> 1% -> 100 bps),
-    # the 0x/twak convention. This is conservative for the common <1% range and
-    # MUST be confirmed against a real non-zero-impact quote; "0" maps to ~0 bps
-    # either way.
+    # priceImpact UNIT IS UNCONFIRMED: the only real sample is "0", which gives no
+    # signal about the unit (it could be percent, fraction, or bps). Guessing percent
+    # and multiplying by 100 would understate impact 100x if it is actually a fraction
+    # -> a too-lax gate that could approve a too-costly trade. So we FAIL CLOSED here:
+    #   - priceImpact == 0  -> proceed on the spread-only cost (zero impact either way).
+    #   - priceImpact != 0  -> deny ("{name}_price_impact_unit_unconfirmed").
+    # TODO: confirm the priceImpact unit against a real NON-ZERO-impact twak quote, then
+    # implement the correct unit conversion and re-enable nonzero-impact costing.
     output_qty = _decimal(quote["output_qty"], f"{name}_malformed_output_qty", denied)
     minimum_output = _decimal(quote["minimum_output"], f"{name}_malformed_minimum_output", denied)
     price_impact = _decimal(quote["price_impact"], f"{name}_malformed_price_impact", denied)
@@ -134,6 +138,8 @@ def _validate_live(name: str, quote: dict, denied: list[str]) -> dict[str, Decim
         denied.append(f"{name}_nonpositive_output")
     if minimum_output <= 0:
         denied.append(f"{name}_nonpositive_minimum_output")
+    if price_impact != 0:
+        denied.append(f"{name}_price_impact_unit_unconfirmed")
     return {
         "schema": "live",
         "output_qty": output_qty,
@@ -180,12 +186,14 @@ def evaluate_cost_viability(
             "max_round_trip_cost_bps": str(cfg.max_round_trip_cost_bps),
         }
     else:
-        # SPREAD-ONLY (live, or any mix involving a live leg): per leg cost is the
-        # slippage spread bps plus priceImpact (percent -> bps). No gas/fee data.
+        # SPREAD-ONLY (live, or any mix involving a live leg): per-leg cost is the
+        # slippage spread bps. We reach here only when every live leg had
+        # priceImpact == 0 (any nonzero priceImpact already failed closed in
+        # _validate_live, with the denial short-circuiting above), so there is no
+        # priceImpact term to add — it is zero. No gas/fee data either.
         def _leg_cost(leg: dict[str, Decimal]) -> tuple[Decimal, Decimal]:
             spread = _spread_bps(leg["output_qty"], leg["minimum_output"])
-            impact = leg.get("price_impact", Decimal("0")) * Decimal("100")
-            return spread, impact
+            return spread, Decimal("0")
 
         buy_spread, buy_impact = _leg_cost(buy)
         sell_spread, sell_impact = _leg_cost(sell)
