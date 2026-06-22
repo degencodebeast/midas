@@ -207,9 +207,11 @@ def test_cli_twak_mode_passes_executor_to_build_app(monkeypatch, tmp_path):
 
     captured = {}
 
-    def fake_build_app(*, mode, root_dir):
+    def fake_build_app(*, mode, root_dir, use_live_frames, use_live_cmc):
         captured["mode"] = mode
         captured["root_dir"] = root_dir
+        captured["use_live_frames"] = use_live_frames
+        captured["use_live_cmc"] = use_live_cmc
         return SimpleNamespace()
 
     def fake_run_live(app, *, clock, max_iters):
@@ -222,4 +224,50 @@ def test_cli_twak_mode_passes_executor_to_build_app(monkeypatch, tmp_path):
 
     cli._cmd_run(args)
 
-    assert captured == {"mode": "twak", "root_dir": tmp_path, "max_iters": 1}
+    assert captured == {
+        "mode": "twak", "root_dir": tmp_path, "max_iters": 1,
+        "use_live_frames": False, "use_live_cmc": False,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Live market-DATA flags: --live-frames / --live-cmc (read-only, default OFF)
+# ---------------------------------------------------------------------------
+
+def test_live_data_flags_default_off():
+    p = build_parser()
+    args = p.parse_args(["run"])
+    assert args.live_frames is False
+    assert args.live_cmc is False
+
+
+def test_live_data_flags_parse_on():
+    p = build_parser()
+    args = p.parse_args(["run", "--live-frames", "--live-cmc"])
+    assert args.live_frames is True
+    assert args.live_cmc is True
+
+
+def test_cmd_run_forwards_live_data_flags_to_build_app(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from magic_agent import cli
+
+    captured = {}
+
+    def fake_build_app(*, mode, root_dir, use_live_frames, use_live_cmc):
+        captured.update(
+            mode=mode, use_live_frames=use_live_frames, use_live_cmc=use_live_cmc
+        )
+        return SimpleNamespace()
+
+    monkeypatch.setattr("magic_agent.app.build_app", fake_build_app)
+    monkeypatch.setattr("magic_agent.live.run_live", lambda app, *, clock, max_iters: 0)
+    args = SimpleNamespace(
+        executor="paper", max_iters=1, root_dir=tmp_path,
+        live_frames=True, live_cmc=True,
+    )
+
+    cli._cmd_run(args)
+
+    assert captured["use_live_frames"] is True
+    assert captured["use_live_cmc"] is True

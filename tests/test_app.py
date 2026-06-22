@@ -201,6 +201,46 @@ def test_fixture_cmc_client_is_offline_and_returns_zec(tmp_path):
     assert Decimal(by_symbol["ZEC"].momentum_7d) > 0
 
 
+def test_build_app_default_uses_fixture_cmc_and_fixture_frames(tmp_path):
+    """Default (no live flags) wires the offline FixtureCmcClient + fixture frames."""
+    from magic_agent.frames import FixtureFrameSource
+
+    app = build_app(mode="paper", root_dir=tmp_path)
+    assert isinstance(app.cmc_source.client, FixtureCmcClient)
+    assert isinstance(app.scanner_gateway.frame_source, FixtureFrameSource)
+
+
+def test_build_app_live_cmc_selects_coinmarketcap_client(tmp_path, monkeypatch):
+    """--live-cmc wires the live CoinMarketCapClient (read-only rank/momentum)."""
+    from magic_agent.cmc_source import CoinMarketCapClient
+
+    monkeypatch.setenv("CMC_API_KEY", "fake-key")
+    app = build_app(mode="paper", root_dir=tmp_path, use_live_cmc=True)
+    assert isinstance(app.cmc_source.client, CoinMarketCapClient)
+
+
+def test_build_app_live_cmc_missing_key_fails_closed(tmp_path, monkeypatch):
+    """--live-cmc with no CMC_API_KEY fails closed — never a silent fixture fallback."""
+    monkeypatch.delenv("CMC_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="CMC_API_KEY"):
+        build_app(mode="paper", root_dir=tmp_path, use_live_cmc=True)
+
+
+def test_build_app_live_frames_selects_gateio_frame_source(tmp_path):
+    """--live-frames wires the read-only GateioFrameSource instead of fixtures."""
+    from magic_agent.frames import GateioFrameSource
+
+    app = build_app(mode="paper", root_dir=tmp_path, use_live_frames=True)
+    assert isinstance(app.scanner_gateway.frame_source, GateioFrameSource)
+
+
+def test_build_app_injected_cmc_client_wins_over_live_flag(tmp_path):
+    """An explicit cmc_client override always wins (tests / overrides)."""
+    injected = FixtureCmcClient()
+    app = build_app(mode="paper", root_dir=tmp_path, use_live_cmc=True, cmc_client=injected)
+    assert app.cmc_source.client is injected
+
+
 def test_build_app_paper_works_from_non_repo_root_cwd(tmp_path, monkeypatch):
     """build_app must not raise FileNotFoundError when the process cwd is NOT the repo root.
 

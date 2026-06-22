@@ -48,7 +48,7 @@ from typing import Any
 
 from magic_agent.agent_narrative import AgentNarrativeJournal, live_entry_reconciled_event
 from magic_agent.candidate_source import CandidateSource
-from magic_agent.cmc_source import CmcCandidateSource, RawCmcQuote
+from magic_agent.cmc_source import CmcCandidateSource, CoinMarketCapClient, RawCmcQuote
 from magic_agent.cost_viability import evaluate_cost_viability as _default_evaluate_cost_viability
 from magic_agent.compliance import ComplianceLedger
 from magic_agent.decision_pipeline import DecisionPipeline
@@ -435,6 +435,7 @@ def build_app(
     identity_path: str | Path = _DEFAULT_IDENTITY_PATH,
     fixture_dir: str | Path = _DEFAULT_FIXTURE_DIR,
     use_live_frames: bool = False,
+    use_live_cmc: bool = False,
     cmc_client: Any = None,
     scanner_gateway: Any = None,
     gold_candidate_symbol: str | None = None,
@@ -458,6 +459,10 @@ def build_app(
         fixture_dir: Directory of committed OHLCV frame fixtures (offline scanner).
         use_live_frames: When ``True`` in paper mode, swap the offline fixture
             frame source for the read-only :class:`GateioFrameSource` (still no funds).
+        use_live_cmc: When ``True``, swap the offline :class:`FixtureCmcClient` for
+            the live :class:`~magic_agent.cmc_source.CoinMarketCapClient` (read-only
+            rank/momentum; reads ``CMC_API_KEY`` from env, fails closed if absent).
+            Ignored when an explicit ``cmc_client`` is injected.
         cmc_client: Override the CMC client (defaults to the offline
             :class:`FixtureCmcClient`); injectable for tests.
         scanner_gateway: Override the scanner gateway (defaults to the real
@@ -537,10 +542,25 @@ def build_app(
     else:
         state = RuntimeState.new_session(starting_equity)
 
-    # CMC candidate source (offline client by default). The real x402 live CMC client
-    # is a separate deferred concern; in live mode this still defaults to the offline
-    # FixtureCmcClient unless an explicit cmc_client is injected.
-    cmc_source = CmcCandidateSource(eligibility, registry, cmc_client or FixtureCmcClient())
+    # CMC candidate source. Selection precedence:
+    #   1. an explicit injected ``cmc_client`` (tests / overrides) — always wins;
+    #   2. ``use_live_cmc`` -> the live, read-only CoinMarketCapClient (reads
+    #      CMC_API_KEY from env, fails closed if absent — NEVER a silent fixture
+    #      fallback). Resolves competition symbols to CMC ids via the registry and
+    #      batches ONE quotes/latest call. Supplies rank/momentum only (observe/
+    #      veto/clamp) — the scanner remains the sole setup authority;
+    #   3. otherwise the offline, deterministic FixtureCmcClient (default).
+    if cmc_client is not None:
+        resolved_cmc_client: Any = cmc_client
+    elif use_live_cmc:
+        # Fail CLOSED on a missing key — the live universe cannot be fetched without
+        # it, and silently degrading to the fixture would mis-represent the scan.
+        resolved_cmc_client = CoinMarketCapClient(
+            registry=registry, api_key=os.environ.get("CMC_API_KEY", ""),
+        )
+    else:
+        resolved_cmc_client = FixtureCmcClient()
+    cmc_source = CmcCandidateSource(eligibility, registry, resolved_cmc_client)
     candidate_source = CandidateSource(eligibility, registry)
     # The offline paper watchlist is restricted to the symbols that HAVE a committed
     # frame fixture (the scanner gateway resolves a candidate to a fixture and would

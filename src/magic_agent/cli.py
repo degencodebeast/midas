@@ -42,6 +42,16 @@ def build_parser() -> argparse.ArgumentParser:
     # cycle per closed H1 bar via the bar-close-aligned clock (no busy-spin).
     run.add_argument("--max-iters", type=int, default=None,
                      help="Bound the number of cycles (default: unbounded, paced to closed H1 bars)")
+    # LIVE MARKET-DATA opt-ins (read-only — they NEVER authorize a trade). Both
+    # default OFF (the offline fixture sources). `--live-frames` swaps the offline
+    # fixture OHLC source for the read-only GateioFrameSource; `--live-cmc` swaps the
+    # offline FixtureCmcClient for the live CoinMarketCapClient (observe/veto/rank
+    # only). They are orthogonal to `--executor`: paper execution can scan the REAL
+    # Track-1 universe with no funds at risk.
+    run.add_argument("--live-frames", action="store_true",
+                     help="Use the read-only live gate.io frame source instead of offline fixtures (no funds)")
+    run.add_argument("--live-cmc", action="store_true",
+                     help="Use the live CoinMarketCap client instead of the offline fixture (read-only rank/momentum)")
     run.set_defaults(func=_cmd_run)
 
     sv = sub.add_parser("serve", help="Serve the read-only mission-control dashboard API")
@@ -66,7 +76,14 @@ def _cmd_run(args: argparse.Namespace) -> None:
 
     mode = "paper" if args.executor == "paper" else "twak"
     root_dir = getattr(args, "root_dir", None)
-    app = build_app(mode=mode, root_dir=root_dir)
+    # Live market-DATA flags (read-only; never authorize a trade). Default OFF =
+    # offline fixtures, so a bare run stays fully offline.
+    app = build_app(
+        mode=mode,
+        root_dir=root_dir,
+        use_live_frames=getattr(args, "live_frames", False),
+        use_live_cmc=getattr(args, "live_cmc", False),
+    )
 
     # A bar-close-aligned clock: each cycle paces to the next closed H1 bar (the
     # scanner doctrine is H1-closed-bar driven), so a bare `magic-agent run` waits
