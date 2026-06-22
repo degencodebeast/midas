@@ -667,3 +667,23 @@ def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatc
     assert app.mode == "twak"
     assert app.execution_coordinator.__class__.__name__ == "ExecutionCoordinator"
     assert app.state.canary_mode is True
+
+
+def test_build_app_twak_rpc_default_is_fail_closed(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    for name in ("TWAK_ACCESS_ID","TWAK_HMAC_SECRET","TWAK_WALLET_PASSWORD","BSC_RPC_URL","CMC_API_KEY","WALLET_ADDRESS"):
+        monkeypatch.setenv(name, "test-secret")
+    fake_twak = SimpleNamespace(json=lambda args, timeout=60: {"success": True, "data": {}})
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        frame_source=SimpleNamespace(),
+        twak_runner=fake_twak,
+        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+    )
+    rpc = app.execution_coordinator.rpc
+    # Fail-closed default: never fabricates a success receipt.
+    assert rpc.confirmations({"blockNumber": "0x10"}) == 0
+    receipt = rpc.wait_receipt("0xabc")
+    assert receipt["status"] == "0x0"

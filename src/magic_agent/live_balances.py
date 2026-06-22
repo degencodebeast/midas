@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+
+from magic_agent.twak import TwakError
 
 
 class TwakBalanceReader:
@@ -18,10 +20,15 @@ class TwakBalanceReader:
             "--json",
         ])
         data = payload.get("data", payload)
-        return {
-            "stable": Decimal(str(data["stable"])),
-            "token": Decimal(str(data["token"])),
-        }
+        result: dict[str, Decimal] = {}
+        for key in ("stable", "token"):
+            if key not in data:
+                raise TwakError(f"twak balance payload missing {key!r}")
+            try:
+                result[key] = Decimal(str(data[key]))
+            except (InvalidOperation, TypeError) as exc:
+                raise TwakError(f"twak balance payload has non-numeric {key!r}") from exc
+        return result
 
 
 @dataclass
