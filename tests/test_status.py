@@ -351,3 +351,40 @@ class TestSpotStatusExecutorProjection:
         assert pos.entry_price == 0.0
         assert pos.stop_loss is None
         assert pos.take_profit is None
+
+
+def test_status_includes_live_mode_and_qualification():
+    from decimal import Decimal
+    from magic_agent.runtime_state import RuntimeState
+
+    class Executor:
+        def get_position(self):
+            from magic_agent.models import PositionState
+            return PositionState()
+
+        def get_account(self, *, mark_price):
+            from magic_agent.models import AccountState
+            return AccountState(equity=10000.0, available=10000.0, currency="USDT")
+
+    state = RuntimeState.new_session(Decimal("10000"))
+    status = build_status(
+        Executor(),
+        symbol="ZEC/USDT",
+        mode="paper",
+        venue="paper",
+        mark_price=0.0,
+        starting_equity=10000.0,
+        live_mode=state.live_mode_state(),
+        qualification={
+            "minimum_trade_count": 7,
+            "completed_trade_count": 0,
+            "required_by_now": 3,
+            "behind_pace": True,
+            "warning": "minimum_trade_count_behind_pace",
+            "can_force_trade": False,
+        },
+    )
+
+    assert status["live_mode"]["mode"] == "canary"
+    assert status["qualification"]["behind_pace"] is True
+    assert status["qualification"]["can_force_trade"] is False

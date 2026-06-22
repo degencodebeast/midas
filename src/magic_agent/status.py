@@ -29,6 +29,8 @@ def build_status(
     daily_loss: float | None = None,
     max_daily_loss: float | None = None,
     agent_id: str | None = None,
+    live_mode: dict | None = None,
+    qualification: dict | None = None,
 ) -> dict:
     """Return a JSON-serialisable status dict matching the dashboard contract.
 
@@ -113,6 +115,8 @@ def build_status(
         "daily_loss": daily_loss,
         "max_daily_loss": max_daily_loss,
         "agent_id": agent_id,
+        "live_mode": live_mode,
+        "qualification": qualification,
         "positions": positions,
     }
 

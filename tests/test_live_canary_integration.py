@@ -109,3 +109,26 @@ def test_approved_canary_without_auto_promote_requires_manual(tmp_path):
     assert app.state.canary_mode is True
     assert app.state.promotion_reason == "manual_promotion_required"
     assert app.state.cost_viability_evidence["approved"] is True
+
+
+from magic_agent.qualification import QualificationConfig
+
+
+def test_qualification_pace_is_advisory_and_cannot_force_trade(tmp_path):
+    now = datetime(2026, 6, 25, 0, 0, tzinfo=timezone.utc)
+    app = build_app(
+        mode="paper",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+    )
+    app.qualification_config = QualificationConfig(
+        minimum_trade_count=7,
+        window_start=datetime(2026, 6, 22, 0, 0, tzinfo=timezone.utc),
+        window_end=datetime(2026, 6, 29, 0, 0, tzinfo=timezone.utc),
+    )
+
+    run_cycle(app, now)
+
+    assert app.qualification_pace["behind_pace"] is True
+    assert app.qualification_pace["can_force_trade"] is False
+    assert app.execution_coordinator.confirmed_records() == []

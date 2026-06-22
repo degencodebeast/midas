@@ -80,6 +80,9 @@ def _app(*, authorized: bool, policy_present: bool = True, execution_eligible: b
         execution_journal=SimpleNamespace(confirmed_records=lambda: executions),
         state_journal=SimpleNamespace(save=lambda payload: None),
         position_store=SimpleNamespace(save=lambda positions: None),
+        # run_cycle recomputes advisory qualification pace before each publish; the
+        # fake app has no qualification_config, so the real method would no-op anyway.
+        update_qualification_pace=lambda observed_at: None,
         # run_cycle publishes a live status snapshot at each end-of-cycle save point;
         # the fake app stubs it out (no dashboard file in these pipeline-shape tests).
         publish_status=lambda: None,

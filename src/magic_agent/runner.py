@@ -63,6 +63,7 @@ def run_cycle(app, now) -> None:
         app.position_store.save(app.position_manager.book)
         # Publish the live status snapshot alongside the persisted state so the
         # dashboard reflects the post-exit book this cycle (consistent with the save).
+        app.update_qualification_pace(now)
         app.publish_status()
         return
     # Operator kill-switch: halt NEW ENTRIES while preserving protective exits (which
@@ -73,6 +74,7 @@ def run_cycle(app, now) -> None:
         app.compliance.observe(app.execution_journal.confirmed_records(), now)
         app.state_journal.save(app.state.as_dict())
         app.position_store.save(app.position_manager.book)
+        app.update_qualification_pace(now)
         app.publish_status()
         return
     cmc_batch = app.cmc_source.snapshot(now)
@@ -135,4 +137,5 @@ def run_cycle(app, now) -> None:
     # Publish the live status snapshot once per cycle, consistent with the persisted
     # state, so the dashboard's /api/status shows real paper data (not the demo
     # fallback). An additional write — the ordering/invariants above are untouched.
+    app.update_qualification_pace(now)
     app.publish_status()

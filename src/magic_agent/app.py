@@ -65,6 +65,7 @@ from magic_agent.paper_adapter import PaperExecutionAdapter
 from magic_agent.paper_exits import PaperExitPorts
 from magic_agent.position_manager import PositionManager
 from magic_agent.position_store import PositionStore
+from magic_agent.qualification import QualificationConfig, evaluate_qualification_pace
 from magic_agent.quotes import ExecutabilityAdapter, PaperQuoteProvider
 from magic_agent.risk_policy import RiskConfig, RiskPolicy
 from magic_agent import recovery
@@ -273,6 +274,25 @@ class App:
     # Narrative journal: appends a live-entry-reconciled event after each RECONCILED
     # entry. None on a hand-assembled test App (the journal append is then skipped).
     agent_narrative: AgentNarrativeJournal | None = None
+    # Advisory minimum-trade-count pace. ADVISORY ONLY: surfaced for status/
+    # observability and journaled when behind, never used to authorize/size/force a trade.
+    qualification_config: QualificationConfig | None = None
+    qualification_pace: dict | None = None
+
+    def update_qualification_pace(self, now) -> None:
+        """Recompute advisory minimum-trade-count pace. ADVISORY ONLY — it records a
+        warning but cannot authorize, size, or force a trade."""
+        if self.qualification_config is None:
+            self.qualification_pace = None
+            return
+        completed = len(self.execution_journal.confirmed_records())
+        self.qualification_pace = evaluate_qualification_pace(
+            completed_trade_count=completed,
+            now=now,
+            config=self.qualification_config,
+        ).as_dict()
+        if self.qualification_pace["behind_pace"]:
+            self.exclusion_journal.append_code("TRACK1", "minimum_trade_count_behind_pace", now)
 
     def publish_status(self) -> None:
         """Publish a live status snapshot for the dashboard's /api/status reader.
@@ -316,6 +336,8 @@ class App:
             daily_loss=None,
             max_daily_loss=None,
             agent_id=self.agent_id,
+            live_mode=self.state.live_mode_state(),
+            qualification=self.qualification_pace,
         )
         write_status_snapshot(self.status_dir / "status.json", snapshot)
 
