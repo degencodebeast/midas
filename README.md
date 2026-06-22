@@ -41,9 +41,12 @@ machine (VPS, CI, collaborators). Before deploying to a VPS: push commit `5f9255
 magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 ```
 
-Then run `uv lock` and commit both files. That repo is **public**, so no GitHub token
-is needed for a clean VPS install. See Known limitation (d) in
-[`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md).
+Then run `uv lock` and commit both files. That repo is **private**, so a clean VPS/CI
+install needs a **read-only GitHub token** (a fine-grained PAT with Contents: read on
+`trading-scanner`) configured via git's credential helper / `url.insteadOf` — **never**
+embedded in the pinned URL or committed. See Known limitation (d) in
+[`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md), and `deploy/docker-smoke.sh`
+which verifies the token-authenticated clone in a clean Linux container.
 
 ```bash
 uv sync                       # installs magic-agent + the commit-pinned scanner

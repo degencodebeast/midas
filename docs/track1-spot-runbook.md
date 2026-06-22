@@ -56,9 +56,9 @@ confirmed it. Do not mark items speculatively.
       (or a reviewed successor commit — never a branch reference).
 - [ ] The scanner source uses a `git = "https://github.com/..."` URL, **not** a
       `file://` local path. The `file://` form is machine-local and will fail on VPS
-      deploy. Push commit `5f92552` to the public trading-scanner repo and switch
-      `pyproject.toml` to the `https://github.com/degencodebeast/trading-scanner` URL
-      before deploying to a VPS.
+      deploy. Commit `5f92552` is pushed to the (PRIVATE) trading-scanner repo and
+      `pyproject.toml` uses the `https://github.com/degencodebeast/trading-scanner` URL.
+      Because the repo is private, the VPS/CI clone needs a read-only GitHub token (d).
 - [ ] `uv lock` has been re-run after any `pyproject.toml` change; `uv.lock` is
       committed.
 - [ ] `uv run python -c "import magic_scanner; print(magic_scanner.__version__)"` (or
@@ -265,13 +265,25 @@ names, parameter names, and return shape against the actual bnbagent-sdk docs be
 deploying a real ERC-8004 adapter. Use `uv sync --extra identity` only after this
 validation.
 
-**(d) Scanner pin is a `file://` machine-local path — push before VPS deploy.**
-`pyproject.toml` currently pins the scanner with `git = "file:///Users/..."`. This is
-valid for local development but will fail on any other machine (VPS, CI, collaborators).
-Before deploying to a VPS: push commit `5f92552e8fdd688808e2709eefc176ab681b7f4f` to
-the public `github.com/degencodebeast/trading-scanner` remote, update `pyproject.toml`
-to `git = "https://github.com/degencodebeast/trading-scanner"`, run `uv lock`, and
-commit both files. Never deploy with a `file://` source.
+**(d) Scanner is a PRIVATE `git+https` pin — deploys need a read-only GitHub token.**
+`pyproject.toml` pins the scanner at `git = "https://github.com/degencodebeast/trading-scanner"`
+rev `5f92552e8fdd688808e2709eefc176ab681b7f4f` (no more `file://` — that is resolved).
+Because `degencodebeast/trading-scanner` is **private**, a clean `uv sync` on the VPS / CI /
+Docker must authenticate the clone (a Mac with cached GitHub creds works, but a fresh box
+does not — verified: `deploy/docker-smoke.sh` fails closed without a token). Configure a
+**fine-grained read-only PAT** (Contents: read on `trading-scanner`) via git — do NOT put
+the token in the pinned URL or commit it:
+
+```bash
+# on the VPS (token in env / git config only, never in the repo):
+git config --global url."https://oauth2:${GITHUB_TOKEN}@github.com/".insteadOf "https://github.com/"
+chmod 600 ~/.gitconfig   # the token lands here in plaintext — restrict it
+uv sync                  # now resolves the private scanner with the token
+```
+
+Verify before the VPS with `GITHUB_TOKEN_FILE=~/.midas-gh-token bash deploy/docker-smoke.sh`
+(a clean Linux container proves the token-authenticated clone + paper runtime). Never deploy
+with a `file://` source.
 
 ---
 
