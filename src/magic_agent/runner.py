@@ -32,17 +32,35 @@ Load-bearing safety invariants preserved here:
 """
 from __future__ import annotations
 
+import logging
+from collections import Counter
+
 from magic_agent.cmc_selector import select_candidates
 from magic_agent.risk_policy import MarketRiskContext
 from magic_agent.spot_models import ActionPurpose
 
+# Operator console narrative. Every line below MIRRORS data already written to the
+# JSONL journals (decision / exclusion / narrative / status) — it is additive
+# observability, never a new source of truth, and NEVER carries a secret.
+_log = logging.getLogger(__name__)
+
+
+def _fmt(value) -> str:
+    """Render a Decimal/None price for the operator line (``?`` when absent)."""
+    return "?" if value is None else str(value)
+
 
 def run_cycle(app, now) -> None:
     app.reconcile_unfinished()
+    # Cycle header — the FIRST visible line each cycle so an operator sees the loop is
+    # alive even when nothing fires. Mode mirrors the dashboard status `mode`.
+    mode = getattr(app, "mode", "paper")
+    _log.info("=== cycle %s · mode=%s ===", now.isoformat(), mode)
     # Protective exits run FIRST, unconditionally. ``process_exits`` returns how many
     # protective actions (full closes / partial risk reductions) it executed this cycle.
     exited = app.position_manager.process_exits(now)
     if app.state.blocks_new_exposure:
+        _log.info("cycle done · exposure halted (blocks_new_exposure) · no new entries")
         return
     if app.risk_policy is None:
         raise RuntimeError("mandatory RiskPolicy is missing")
@@ -56,6 +74,7 @@ def run_cycle(app, now) -> None:
     # (``state_journal.save`` + ``position_store.save``) still runs below so the close
     # is durable and the loop stays consistent.
     if exited:
+        _log.info("EXIT cycle · %d protective action(s) fired → entries deferred to next cycle", exited)
         if app.watchlist.state.discovery_due(now):
             app.watchlist.mark_discovery(now)
         app.compliance.observe(app.execution_journal.confirmed_records(), now)
@@ -70,6 +89,7 @@ def run_cycle(app, now) -> None:
     # already ran above via process_exits). Persist + publish the post-exit state, then
     # return WITHOUT entering the entry phase. Never placed before process_exits.
     if getattr(app, "kill_switch_path", None) is not None and app.kill_switch_path.exists():
+        _log.info("cycle done · kill-switch present (HALT_NEW_ENTRIES) · new entries halted")
         app.exclusion_journal.append_code("TRACK1", "kill_switch_halt_new_entries", now)
         app.compliance.observe(app.execution_journal.confirmed_records(), now)
         app.state_journal.save(app.state.as_dict())
@@ -85,17 +105,50 @@ def run_cycle(app, now) -> None:
     )
     app.exclusion_journal.append_many(batch.exclusions, now)
     fresh = {row.identity_key: row for row in select_candidates(list(snapshots.values()), now=now)}
-    for candidate in (*batch.monitoring, *batch.discovery):
+
+    # ---- Operator universe / eligibility line (mirrors the exclusion journal). ----
+    # Discovered = everything CMC observed this cycle. Eligible = the candidates that
+    # actually reach the scan loop (monitoring + due-discovery). Excluded reason_codes
+    # are aggregated from the structured exclusions already journaled above.
+    eligible = (*batch.monitoring, *batch.discovery)
+    eligible_symbols = [c.symbol for c in eligible]
+    excluded_reasons = Counter(
+        row.reason_code for row in (*cmc_batch.exclusions, *batch.exclusions)
+    )
+    # DEBUG: the per-candidate exclusion lines (the verbose detail an operator opts
+    # into with -v). INFO keeps the one-line aggregate below.
+    for row in (*cmc_batch.exclusions, *batch.exclusions):
+        _log.debug("  excluded %s: %s", row.symbol, row.reason_code)
+    excluded_total = sum(excluded_reasons.values())
+    _log.info(
+        "universe: %d candidates → %d eligible %s · excluded %d: %s",
+        len(snapshots), len(eligible),
+        f"[{', '.join(eligible_symbols)}]" if eligible_symbols else "[]",
+        excluded_total, dict(excluded_reasons),
+    )
+
+    entered = False
+    for candidate in eligible:
         setup = app.scanner_gateway.scan(candidate)
         if setup is None:
+            _log.info("scan %s: no setup", candidate.symbol)
             continue
+        # Per-token scan result (grade / direction / entry / stop), mirroring the
+        # scanner output the decision journal records.
+        _log.info(
+            "scan %s: %s %s setup (entry %s, stop %s)",
+            candidate.symbol, setup.grade, setup.bias_alignment,
+            _fmt(setup.entry), _fmt(setup.structural_stop),
+        )
         if candidate in batch.discovery:
             app.watchlist.promote(candidate.symbol)
         snapshot = candidate.snapshot
         if not candidate.execution_eligible:
+            _log.info("decision %s: NO_TRADE [denied_by=identity_not_gold]", candidate.symbol)
             app.exclusion_journal.append_code(candidate.symbol, "identity_not_gold", now)
             continue
         if snapshot is None or fresh.get(snapshot.identity_key) is None:
+            _log.info("decision %s: NO_TRADE [denied_by=cmc_stale_or_vetoed]", candidate.symbol)
             app.exclusion_journal.append_code(candidate.symbol, "cmc_stale_or_vetoed", now)
             continue
         market = MarketRiskContext(
@@ -107,6 +160,10 @@ def run_cycle(app, now) -> None:
             risk_state=app.state.risk_state(), risk_policy=app.risk_policy,
         )
         if not prepared.approved:
+            _log.info(
+                "decision %s: NO_TRADE [denied_by=%s]",
+                candidate.symbol, ", ".join(prepared.reasons) or "not_executable",
+            )
             continue
         inputs = app.lifecycle_evaluator.evaluate(
             app.observe_entry(setup, prepared.risk, now),
@@ -114,8 +171,21 @@ def run_cycle(app, now) -> None:
         decision = app.pipeline.decide(inputs)
         app.decision_journal.append(decision, now)
         if decision.intent is not None:
+            risk = prepared.risk
+            # risk_budget_usd carries the deploy NOTIONAL; risk_fraction the effective
+            # margin (% of equity). Mirrors the decision journal + risk decision.
+            _log.info(
+                "decision %s: ENTER size=$%s margin=%s%%",
+                candidate.symbol, _fmt(getattr(risk, "risk_budget_usd", None)),
+                _fmt(getattr(risk, "risk_fraction", None)),
+            )
             result = app.execution_coordinator.submit(
                 decision.intent, quote=prepared.quote, policy=prepared.risk,
+            )
+            _log.info(
+                "BUY %s $%s @ %s stop %s → %s",
+                candidate.symbol, _fmt(getattr(risk, "risk_budget_usd", None)),
+                _fmt(setup.entry), _fmt(setup.structural_stop), result,
             )
             app.after_entry_submission(
                 intent=decision.intent,
@@ -124,7 +194,15 @@ def run_cycle(app, now) -> None:
                 risk=prepared.risk,
                 now=now,
             )
+            entered = True
             break
+        # The pipeline returned a non-entry action (hold / risk-denied) — surface it as
+        # NO_TRADE with the gate reason so the operator sees why nothing fired.
+        _log.info(
+            "decision %s: NO_TRADE [denied_by=%s]", candidate.symbol, decision.reason,
+        )
+    if not entered:
+        _log.info("decision: NO_TRADE this cycle")
     if app.watchlist.state.discovery_due(now):
         app.watchlist.mark_discovery(now)
     app.compliance.observe(app.execution_journal.confirmed_records(), now)
@@ -139,3 +217,47 @@ def run_cycle(app, now) -> None:
     # fallback). An additional write — the ordering/invariants above are untouched.
     app.update_qualification_pace(now)
     app.publish_status()
+    _log_cycle_footer(app)
+
+
+def _log_cycle_footer(app) -> None:
+    """Emit the end-of-cycle footer (positions / equity / drawdown).
+
+    Mirrors the published status snapshot. Reads defensively so a hand-assembled test
+    App (which may omit equity fields) never breaks the loop on observability.
+    """
+    try:
+        positions = len(app.position_manager.book)
+    except Exception:
+        positions = 0
+    equity = getattr(app.state, "equity_usd", None)
+    peak = getattr(app.state, "peak_equity_usd", None)
+    drawdown_pct = "?"
+    band = "unknown"
+    try:
+        if equity is not None and peak is not None and peak > 0:
+            dd = max(0, (peak - equity) / peak)
+            drawdown_pct = f"{float(dd) * 100:.1f}"
+            band = _drawdown_band(app, dd)
+    except Exception:
+        pass
+    _log.info(
+        "cycle done · positions=%d · equity=$%s · drawdown=%s%% (%s)",
+        positions, _fmt(equity), drawdown_pct, band,
+    )
+
+
+def _drawdown_band(app, drawdown) -> str:
+    """Name the drawdown band from the RiskConfig thresholds (best-effort, observability
+    only — it never gates anything)."""
+    config = getattr(app.risk_policy, "config", None)
+    if config is None:
+        return "unknown"
+    try:
+        if drawdown >= config.drawdown_defense:
+            return "defense"
+        if drawdown >= config.drawdown_throttle:
+            return "throttle"
+    except Exception:
+        return "unknown"
+    return "normal"

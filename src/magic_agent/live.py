@@ -18,11 +18,16 @@ instead raise ``StopIteration`` to end the loop deterministically.
 """
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from magic_agent.runner import run_cycle
+
+# Loop-boundary narrative (terse — one line per boundary, not per-cycle spam; the
+# per-cycle play-by-play lives in run_cycle).
+_log = logging.getLogger(__name__)
 
 # One closed H1 bar per cycle — the scanner doctrine is H1-closed-bar driven, so the
 # production clock paces to the top of each hour rather than busy-spinning.
@@ -104,12 +109,21 @@ def run_live(app, *, clock: Callable[[], object], max_iters: int | None = None) 
     Returns:
         The number of cycles processed.
     """
+    _log.info(
+        "live loop: max_iters=%s, cadence=closed-H1-bar",
+        "unbounded" if max_iters is None else max_iters,
+    )
     processed = 0
     while max_iters is None or processed < max_iters:
+        if processed > 0:
+            # The clock blocks here until the next closed H1 bar; tell the operator
+            # the loop is waiting (not hung) between cycles.
+            _log.info("waiting for next closed H1 bar…")
         try:
             now = clock()
         except StopIteration:
             break
         run_cycle(app, now)
         processed += 1
+    _log.info("live loop: clean shutdown after %d cycle(s)", processed)
     return processed

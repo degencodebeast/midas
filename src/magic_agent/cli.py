@@ -15,6 +15,8 @@ live status snapshot the ``run`` loop writes and falls back to a clearly-labelle
 from __future__ import annotations
 
 import argparse
+import logging
+import sys
 
 from magic_agent.status_store import DEFAULT_STATUS_PATH
 
@@ -52,6 +54,10 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Use the read-only live gate.io frame source instead of offline fixtures (no funds)")
     run.add_argument("--live-cmc", action="store_true",
                      help="Use the live CoinMarketCap client instead of the offline fixture (read-only rank/momentum)")
+    # Operator verbosity: INFO is the default visible narrative; -v adds DEBUG detail
+    # (per-candidate exclusion lines, raw quote fields). Never logs secrets either way.
+    run.add_argument("-v", "--verbose", action="store_true",
+                     help="Verbose console logging (DEBUG); default is the INFO operator narrative")
     run.set_defaults(func=_cmd_run)
 
     sv = sub.add_parser("serve", help="Serve the read-only mission-control dashboard API")
@@ -64,6 +70,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _configure_console_logging(*, verbose: bool) -> None:
+    """Send the operator narrative to stdout at INFO (DEBUG under ``-v``).
+
+    Configures the ROOT logger so every ``magic_agent.*`` module logger surfaces on
+    the console — the run loop previously emitted nothing visible, so an operator
+    watching a live canary saw only a third-party banner. ``basicConfig`` is a no-op
+    when handlers already exist, so this never double-configures or clobbers a
+    caller-installed handler (e.g. a host process that set up logging first); we then
+    only nudge the level so ``-v`` still takes effect in that case.
+
+    Format is operator-readable: ``HH:MM:SS LEVEL message``. NEVER logs secrets — no
+    keys / passwords / tx-signing material flow into a log call anywhere in the loop.
+    """
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(message)s",
+        datefmt="%H:%M:%S",
+        stream=sys.stdout,
+    )
+    # basicConfig is a no-op when the root logger already has handlers; ensure the
+    # requested level still applies so `-v` is honored even if logging was pre-set up.
+    logging.getLogger().setLevel(level)
+
+
 def _cmd_run(args: argparse.Namespace) -> None:
     # Assemble the runtime App and drive the shared poll loop. Paper is the default
     # (simulated fills, no funds, no network). `--executor twak` is the only live
@@ -73,6 +104,10 @@ def _cmd_run(args: argparse.Namespace) -> None:
     # the scanner / RiskPolicy / coordinator directly.
     from magic_agent.app import build_app
     from magic_agent.live import make_bar_aligned_clock, run_live
+
+    # Make the operator narrative VISIBLE on stdout before the loop starts (the loop
+    # itself emits nothing without this). Default INFO; -v adds DEBUG detail.
+    _configure_console_logging(verbose=getattr(args, "verbose", False))
 
     mode = "paper" if args.executor == "paper" else "twak"
     root_dir = getattr(args, "root_dir", None)
@@ -156,6 +191,10 @@ def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,
 def _cmd_serve(args: argparse.Namespace) -> None:  # pragma: no cover
     import uvicorn
 
+    # serve hosts the read-only dashboard API (it does not drive run_cycle), but
+    # configure console logging here too so the operator gets consistent, visible
+    # INFO output across both subcommands.
+    _configure_console_logging(verbose=getattr(args, "verbose", False))
     app = build_serve_app(log_path=args.log)
     uvicorn.run(app, host=args.host, port=args.port)
 
