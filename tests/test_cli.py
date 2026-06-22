@@ -199,3 +199,27 @@ def test_build_serve_app_absent_snapshot_falls_back_to_demo(tmp_path):
     assert data["mode"] == "demo"
     assert "equity" in data
     assert "positions" in data
+
+
+def test_cli_twak_mode_passes_executor_to_build_app(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from magic_agent import cli
+
+    captured = {}
+
+    def fake_build_app(*, mode, root_dir):
+        captured["mode"] = mode
+        captured["root_dir"] = root_dir
+        return SimpleNamespace()
+
+    def fake_run_live(app, *, clock, max_iters):
+        captured["max_iters"] = max_iters
+        return 1
+
+    monkeypatch.setattr("magic_agent.app.build_app", fake_build_app)
+    monkeypatch.setattr("magic_agent.live.run_live", fake_run_live)
+    args = SimpleNamespace(executor="twak", max_iters=1, root_dir=tmp_path)
+
+    cli._cmd_run(args)
+
+    assert captured == {"mode": "twak", "root_dir": tmp_path, "max_iters": 1}

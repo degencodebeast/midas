@@ -687,3 +687,53 @@ def test_build_app_twak_rpc_default_is_fail_closed(tmp_path, monkeypatch):
     assert rpc.confirmations({"blockNumber": "0x10"}) == 0
     receipt = rpc.wait_receipt("0xabc")
     assert receipt["status"] == "0x0"
+
+
+def test_build_app_twak_still_fails_closed_without_required_secrets(tmp_path, monkeypatch):
+    for name in (
+        "TWAK_ACCESS_ID",
+        "TWAK_HMAC_SECRET",
+        "TWAK_WALLET_PASSWORD",
+        "BSC_RPC_URL",
+        "CMC_API_KEY",
+        "WALLET_ADDRESS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    with pytest.raises(RuntimeError, match="missing live secret"):
+        build_app(mode="twak", root_dir=tmp_path)
+
+
+def test_build_app_twak_assembles_live_ports_and_canary_layer_with_fakes(tmp_path, monkeypatch):
+    for name in (
+        "TWAK_ACCESS_ID",
+        "TWAK_HMAC_SECRET",
+        "TWAK_WALLET_PASSWORD",
+        "BSC_RPC_URL",
+        "CMC_API_KEY",
+        "WALLET_ADDRESS",
+    ):
+        monkeypatch.setenv(name, "test-secret")
+
+    fake_scanner = SimpleNamespace(scan=lambda candidate: None)
+    fake_cmc = FixtureCmcClient()
+    fake_frame_source = SimpleNamespace()
+    fake_twak = SimpleNamespace(json=lambda args, timeout=60: {"success": True, "data": {}})
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=fake_scanner,
+        cmc_client=fake_cmc,
+        frame_source=fake_frame_source,
+        twak_runner=fake_twak,
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+    )
+
+    assert app.mode == "twak"
+    assert app.execution_coordinator.__class__.__name__ == "ExecutionCoordinator"
+    assert app.executability.__class__.__name__ == "ExecutabilityAdapter"
+    assert app.state.canary_mode is True
+    assert app.agent_narrative is not None
+    assert hasattr(app, "evaluate_cost_viability")
+    assert hasattr(app, "update_qualification_pace")
