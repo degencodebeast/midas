@@ -28,6 +28,15 @@ from magic_agent.state_journal import IntegrityError, StateJournal
 from magic_agent.status_store import read_status_snapshot
 
 
+def _fake_live_balances(*, equity_usd=Decimal("999"), cash_usd=Decimal("999")):
+    """A live-balances stub providing both the snapshot and wallet_equity surface
+    build_app(mode="twak") now reads (equity = native + USDC, cash = USDC)."""
+    return SimpleNamespace(
+        snapshot=lambda identity_key: {"stable": "999", "token": "1"},
+        wallet_equity=lambda: {"equity_usd": equity_usd, "cash_usd": cash_usd},
+    )
+
+
 class _ControllableFrameSource:
     """A :class:`FrameSource` whose H1 low/high is settable per cycle.
 
@@ -662,7 +671,7 @@ def _live_after_entry_app(tmp_path, monkeypatch, *, sell_quote, twak_json=None):
         frame_source=SimpleNamespace(),
         twak_runner=SimpleNamespace(json=twak_json or (lambda args, timeout=60: {})),
         live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
-        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+        live_balances=_fake_live_balances(),
     )
     # Use the REAL module cost gate (not the injected fake) so we exercise the
     # buy_spread + sell_spread accounting.
@@ -756,6 +765,116 @@ def test_live_after_entry_missing_sell_quote_fails_closed(tmp_path, monkeypatch)
     assert app.state.promotion_reason == "cost_viability_failed"
 
 
+def test_build_app_twak_fresh_session_sizes_off_wallet_equity(tmp_path, monkeypatch):
+    # FIX A: a fresh live session must size off the REAL wallet, NOT the $10k paper
+    # default. equity = native USD + USDC; cash = USDC (deployable stable).
+    _twak_env(monkeypatch)
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_fake_live_balances(
+            equity_usd=Decimal("10.62") + Decimal("10.034925928487288539"),
+            cash_usd=Decimal("10.034925928487288539"),
+        ),
+    )
+
+    assert app.state.equity_usd == Decimal("10.62") + Decimal("10.034925928487288539")
+    assert app.state.cash_usd == Decimal("10.034925928487288539")
+    # Peak / daily anchor seed to equity; the canary stays armed.
+    assert app.state.peak_equity_usd == app.state.equity_usd
+    assert app.state.daily_anchor_usd == app.state.equity_usd
+    assert app.state.canary_mode is True
+    # NOT the paper default.
+    assert app.state.equity_usd != Decimal("10000")
+
+
+def test_build_app_paper_still_sizes_off_default_equity(tmp_path):
+    # PAPER is unchanged: fresh session still seeds the $10k simulated book size.
+    app = build_app(mode="paper", root_dir=tmp_path)
+    assert app.state.equity_usd == Decimal("10000")
+    assert app.state.cash_usd == Decimal("10000")
+
+
+def test_build_app_twak_fails_closed_when_wallet_equity_read_raises(tmp_path, monkeypatch):
+    # FIX A fail-closed: if the live wallet read RAISES at startup, build_app must
+    # propagate (operator sees the error), NOT silently fall back to the $10k paper
+    # default (which would mis-size).
+    from magic_agent.twak import TwakError
+
+    _twak_env(monkeypatch)
+
+    def _raise():
+        raise TwakError("wallet read failed")
+
+    bad_balances = SimpleNamespace(
+        snapshot=lambda identity_key: {"stable": "999", "token": "1"},
+        wallet_equity=_raise,
+    )
+    with pytest.raises(TwakError):
+        build_app(
+            mode="twak",
+            root_dir=tmp_path,
+            scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+            cmc_client=FixtureCmcClient(),
+            frame_source=SimpleNamespace(),
+            twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+            live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+            live_balances=bad_balances,
+        )
+
+
+def test_build_app_twak_restart_keeps_persisted_equity_not_wallet(tmp_path, monkeypatch):
+    # On RESTART (an existing state.json) build_app restores the persisted equity and
+    # does NOT overwrite it from the wallet (continuous live-equity tracking is a
+    # documented follow-up).
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent"
+    base.mkdir(parents=True, exist_ok=True)
+    persisted = RuntimeState.new_live_session(Decimal("123.45"), Decimal("50.00"))
+    StateJournal(base / "state.json").save(persisted.as_dict())
+
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_fake_live_balances(equity_usd=Decimal("999"), cash_usd=Decimal("999")),
+    )
+
+    # Restored from state.json, NOT re-read from the wallet (999).
+    assert app.state.equity_usd == Decimal("123.45")
+    assert app.state.cash_usd == Decimal("50.00")
+
+
+def test_live_after_entry_sell_quote_probe_raise_is_crash_safe(tmp_path, monkeypatch):
+    # FIX B: a transient twak error in the live sell-quote probe must NOT raise out of
+    # after_entry_submission (which would crash the live poll loop AFTER the buy is
+    # booked). Treated as "no quote" => fail closed: stay canary, no promotion.
+    now = datetime(2026, 6, 22, 12, 0, tzinfo=timezone.utc)
+
+    def boom(intent):
+        raise RuntimeError("transient probe failure")
+
+    app, intent, risk = _live_after_entry_app(tmp_path, monkeypatch, sell_quote=boom)
+    app.state.canary_mode = True
+    app.state.auto_promote_after_canary = True
+
+    # Must NOT raise.
+    app.after_entry_submission(intent=intent, result="RECONCILED", quote=_buy_live_quote(), risk=risk, now=now)
+
+    # Position stays in canary (no promotion), with a clear fail-closed reason.
+    assert app.state.canary_mode is True
+    assert app.state.promotion_reason == "cost_viability_failed"
+
+
 def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
@@ -781,7 +900,7 @@ def test_build_app_twak_wires_real_live_ports_when_injected(tmp_path, monkeypatc
         frame_source=fake_frame_source,
         twak_runner=fake_twak,
         live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
-        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+        live_balances=_fake_live_balances(),
     )
 
     assert app.mode == "twak"
@@ -802,7 +921,7 @@ def test_build_app_twak_rpc_default_is_real_bsc_client(tmp_path, monkeypatch):
         scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
         frame_source=SimpleNamespace(),
         twak_runner=fake_twak,
-        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+        live_balances=_fake_live_balances(),
     )
     assert app.execution_coordinator.rpc.__class__.__name__ == "BscRpcClient"
 
@@ -845,7 +964,7 @@ def test_build_app_twak_assembles_live_ports_and_canary_layer_with_fakes(tmp_pat
         frame_source=fake_frame_source,
         twak_runner=fake_twak,
         live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
-        live_balances=SimpleNamespace(snapshot=lambda identity_key: {"stable": "999", "token": "1"}),
+        live_balances=_fake_live_balances(),
     )
 
     assert app.mode == "twak"

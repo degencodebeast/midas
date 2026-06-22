@@ -108,6 +108,28 @@ class RuntimeState:
             daily_anchor_usd=starting_equity,
         )
 
+    @classmethod
+    def new_live_session(cls, equity_usd: Decimal, cash_usd: Decimal) -> "RuntimeState":
+        """Build a fresh LIVE session from the real wallet's equity and cash.
+
+        Mirrors :meth:`new_session` (peak + daily anchor seed to ``equity_usd``, no
+        stops, equity fresh, canary armed, exposure unblocked) but takes a DISTINCT
+        ``cash_usd``: in live, the deployable stable (USDC) is typically less than
+        total equity (which also includes the native gas coin's USD), so cash must
+        not be forced equal to equity the way ``new_session`` does.
+        """
+        for name, value in (("equity_usd", equity_usd), ("cash_usd", cash_usd)):
+            if not isinstance(value, Decimal):
+                raise TypeError(f"{name} must be a Decimal, not float")
+            if value < 0:
+                raise ValueError(f"{name} must not be negative")
+        return cls(
+            equity_usd=equity_usd,
+            cash_usd=cash_usd,
+            peak_equity_usd=equity_usd,
+            daily_anchor_usd=equity_usd,
+        )
+
     def risk_state(self) -> PortfolioRiskState:
         """Project the tracked fields into the frozen risk snapshot.
 

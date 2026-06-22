@@ -152,6 +152,67 @@ def test_malformed_balance_fails_closed():
         reader.snapshot("zec-bsc")
 
 
+def test_wallet_equity_sums_native_usd_and_usdc_balance():
+    # REAL captured BNB+USDC wallet: equity = native totalUsd (10.62) + USDC balance;
+    # cash = the deployable USDC balance only.
+    twak = FakeTwak(_populated_payload())
+    reader = _reader(twak)
+
+    equity = reader.wallet_equity()
+
+    assert equity["equity_usd"] == Decimal("10.62") + Decimal("10.034925928487288539")
+    assert equity["cash_usd"] == Decimal("10.034925928487288539")
+
+
+def test_wallet_equity_empty_tokens_cash_zero_equity_native():
+    twak = FakeTwak(_empty_tokens_payload())
+    reader = _reader(twak)
+
+    equity = reader.wallet_equity()
+
+    # No USDC held -> cash 0; equity is just the native USD.
+    assert equity["cash_usd"] == Decimal("0")
+    assert equity["equity_usd"] == Decimal("20.52")
+
+
+def test_wallet_equity_malformed_total_usd_fails_closed():
+    payload = _populated_payload()
+    payload["totalUsd"] = "not-a-number"
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    from magic_agent.twak import TwakError
+
+    with pytest.raises(TwakError):
+        reader.wallet_equity()
+
+
+def test_wallet_equity_missing_total_usd_fails_closed():
+    payload = _populated_payload()
+    del payload["totalUsd"]
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    from magic_agent.twak import TwakError
+
+    with pytest.raises(TwakError):
+        reader.wallet_equity()
+
+
+def test_wallet_equity_malformed_usdc_balance_fails_closed():
+    payload = _populated_payload()
+    payload["tokens"] = [
+        {"symbol": "USDC", "contract": _BSC_USDC, "balance": "not-a-number"}
+    ]
+    twak = FakeTwak(payload)
+    reader = _reader(twak)
+
+    from magic_agent.twak import TwakError
+
+    with pytest.raises(TwakError):
+        reader.wallet_equity()
+
+
 def test_static_rpc_client_waits_and_counts_confirmations():
     rpc = StaticRpcClient(
         wallet_nonce_value=7,

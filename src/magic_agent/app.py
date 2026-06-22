@@ -388,7 +388,14 @@ class App:
         # quote duplicated as buy+sell is harmless: gas/fee 0, fixed paper cost).
         sell_quote = quote
         if self.mode == "twak" and self.live_sell_quote is not None:
-            sell_quote = self.live_sell_quote(intent)
+            try:
+                sell_quote = self.live_sell_quote(intent)
+            except Exception:
+                # A transient twak probe error (or registry miss) must NEVER crash the
+                # live poll loop AFTER the buy is booked. Treat it as "no quote" and
+                # fail closed (stay canary), consistent with the rest of the live path.
+                _log.exception("live sell-quote probe failed; not promoting (fail closed)")
+                sell_quote = None
             if sell_quote is None:
                 # The live sell quote could not be obtained (port error / rejected).
                 # FAIL CLOSED: never auto-promote without a real sell-leg cost.
@@ -507,8 +514,26 @@ def build_app(
     # and is allowed to propagate (fail closed — never start with an empty book that
     # would re-enter).
     position_store = PositionStore(base / "positions.json")
+    # In LIVE mode the live balance reader (real TwakBalanceReader, or an injected
+    # fake) is resolved up-front so a FRESH live session can size off the actual
+    # wallet (below). Restart restores from state.json unchanged. Built lazily (no
+    # chain call on construction).
+    live_twak = None
+    balances = None
+    if live_mode:
+        live_twak = twak_runner or TwakRunner()
+        balances = live_balances or TwakBalanceReader(twak=live_twak, registry=registry)
     if state_journal.path.exists():
+        # RESTART: restore the persisted session. Do NOT overwrite the restored equity
+        # from the wallet (continuous live-equity tracking each cycle is a FOLLOW-UP).
         state = RuntimeState.from_dict(state_journal.load())
+    elif live_mode:
+        # FRESH LIVE session: size off the REAL wallet (equity = native USD + USDC;
+        # cash = the deployable USDC) — NOT the $10k paper default. If the wallet read
+        # RAISES, it propagates: the operator must see a clear error and retry; we
+        # never silently fall back to the paper default (that would mis-size).
+        equity = balances.wallet_equity()
+        state = RuntimeState.new_live_session(equity["equity_usd"], equity["cash_usd"])
     else:
         state = RuntimeState.new_session(starting_equity)
 
@@ -600,7 +625,8 @@ def build_app(
     # journal via _LiveExecutionView (the SAME journal the coordinator writes to and
     # recovery scans — one source of execution truth).
     if live_mode:
-        live_twak = twak_runner or TwakRunner()
+        # live_twak + balances were resolved up-front (above) so a fresh live session
+        # could size off the wallet; reuse the same instances here.
         wallet_address = os.environ.get("WALLET_ADDRESS", "")
         # Live RPC default: the real BscRpcClient (reads BSC_RPC_URL, guaranteed
         # present by _require_live_env). Construction is lazy (no connection), so the
@@ -611,7 +637,6 @@ def build_app(
             rpc_url=os.environ["BSC_RPC_URL"],
             wallet_address=wallet_address,
         )
-        balances = live_balances or TwakBalanceReader(twak=live_twak, registry=registry)
         quote_provider = TwakQuoteProvider(
             twak=live_twak,
             registry=registry,

@@ -62,6 +62,53 @@ class TwakBalanceReader:
             "native_symbol": str(data.get("symbol", "")),
         }
 
+    def wallet_equity(self) -> dict[str, Decimal]:
+        """Read the live wallet and return ``{'equity_usd', 'cash_usd'}``.
+
+        ``equity_usd`` = native USD (top-level ``totalUsd``) + the deployable stable
+        (USDC) ``balance`` from ``tokens[]``. ``cash_usd`` = that stable balance.
+
+        ``totalUsd`` is the USD value of the NATIVE gas coin (e.g. BNB); ``tokens[]``
+        entries carry no USD, so the stable (USDC, ~1:1 USD) ``balance`` is used as its
+        USD value. NON-STABLE token USD valuation is a FOLLOW-UP (no on-chain pricing
+        here — we never fabricate a price); at canary start no non-stable tokens are
+        held, so equity = native_usd + usdc. Empty ``tokens`` -> cash 0, equity =
+        native_usd. Fails CLOSED (raises :class:`TwakError`) on a malformed payload or
+        a non-numeric ``totalUsd``/stable ``balance``.
+        """
+        payload = self._twak.json([
+            "wallet", "balance",
+            "--chain", self._chain,
+            "--json",
+        ])
+        data = payload.get("data", payload) if isinstance(payload, dict) else None
+        if not isinstance(data, dict):
+            raise TwakError("twak balance payload is not an object")
+        if data.get("error") is not None:
+            raise TwakError(f"twak balance reported error: {data.get('error')!r}")
+
+        raw_total = data.get("totalUsd")
+        if raw_total is None:
+            raise TwakError("twak balance payload is missing 'totalUsd'")
+        try:
+            native_usd = Decimal(str(raw_total))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise TwakError(
+                f"twak balance has non-numeric totalUsd {raw_total!r}"
+            ) from exc
+
+        tokens = data.get("tokens")
+        if tokens is None:
+            tokens = []
+        if not isinstance(tokens, list):
+            raise TwakError("twak balance 'tokens' is not a list")
+
+        usdc_balance = self._extract_token_amount(tokens, symbol=self._stable_symbol, contract=None)
+        return {
+            "equity_usd": native_usd + usdc_balance,
+            "cash_usd": usdc_balance,
+        }
+
     def _extract_token_amount(self, tokens, *, symbol: str | None, contract: str | None) -> Decimal:
         # A populated tokens[] entry is {"symbol", "contract", "balance"} (verified
         # against a real funded BSC balance). Match by symbol (case-insensitive) OR
