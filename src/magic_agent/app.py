@@ -45,8 +45,10 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from magic_agent.agent_narrative import AgentNarrativeJournal, live_entry_reconciled_event
 from magic_agent.candidate_source import CandidateSource
 from magic_agent.cmc_source import CmcCandidateSource, RawCmcQuote
+from magic_agent.cost_viability import evaluate_cost_viability
 from magic_agent.compliance import ComplianceLedger
 from magic_agent.decision_pipeline import DecisionPipeline
 from magic_agent.eligibility import EligibilityLedger
@@ -262,6 +264,12 @@ class App:
     # The real chain journal recovery scans (.records). Bound here so
     # reconcile_unfinished closes over it; never read by run_cycle directly.
     _chain_journal: ExecutionJournal = None  # type: ignore[assignment]
+    # Cost-viability gate (injectable). When None, after_entry_submission falls back
+    # to the module-level evaluate_cost_viability over the paper quote legs.
+    cost_viability: Any = None
+    # Narrative journal: appends a live-entry-reconciled event after each RECONCILED
+    # entry. None on a hand-assembled test App (the journal append is then skipped).
+    agent_narrative: AgentNarrativeJournal | None = None
 
     def publish_status(self) -> None:
         """Publish a live status snapshot for the dashboard's /api/status reader.
@@ -321,6 +329,53 @@ class App:
     def observe_entry(self, setup: Any, risk: Any, now: Any) -> Any:
         """Build the entry :class:`LifecycleObservation` via ``recovery.observe_entry``."""
         return recovery.observe_entry(setup, risk, now)
+
+    def evaluate_cost_viability(self, *, buy_quote: dict | None, sell_quote: dict | None, intended_risk_fraction, now) -> Any:
+        if self.cost_viability is not None:
+            return self.cost_viability.evaluate(
+                buy_quote=buy_quote,
+                sell_quote=sell_quote,
+                intended_risk_fraction=intended_risk_fraction,
+                now=now,
+            )
+        return evaluate_cost_viability(
+            buy_quote=buy_quote,
+            sell_quote=sell_quote,
+            intended_risk_fraction=intended_risk_fraction,
+            now=now.isoformat(),
+        )
+
+    def after_entry_submission(self, *, intent, result: str, quote: dict | None, risk, now) -> None:
+        if result != "RECONCILED":
+            return
+        if self.agent_narrative is not None:
+            self.agent_narrative.append(live_entry_reconciled_event(
+                now=now,
+                setup=intent.setup,
+                risk=risk,
+                mode="canary" if self.state.canary_mode else "normal_scoring",
+                execution_state=result,
+                tx_hash=None,
+                reason="supervised_canary_reconciled" if self.state.canary_mode else "live_entry_reconciled",
+            ))
+        if not self.state.canary_mode:
+            return
+        decision = self.evaluate_cost_viability(
+            buy_quote=quote,
+            sell_quote=quote,
+            intended_risk_fraction=risk.risk_fraction,
+            now=now,
+        )
+        self.state.canary_completed = True
+        self.state.canary_intent_id = intent.intent_id
+        self.state.canary_reconciled_at = now.isoformat()
+        self.state.cost_viability_evidence = decision.evidence
+        if decision.approved and self.state.auto_promote_after_canary:
+            self.state.canary_mode = False
+            self.state.promotion_reason = "canary_reconciled_cost_viable"
+            self.state.normal_scoring_started_at = now.isoformat()
+        else:
+            self.state.promotion_reason = "cost_viability_failed" if not decision.approved else "manual_promotion_required"
 
 
 def build_app(
@@ -564,6 +619,7 @@ def build_app(
         status_dir=base,
         kill_switch_path=base / "HALT_NEW_ENTRIES",
         _chain_journal=chain_journal,
+        agent_narrative=AgentNarrativeJournal(base / "agent_narrative.jsonl"),
     )
 
 

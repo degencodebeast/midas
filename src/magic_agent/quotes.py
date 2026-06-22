@@ -92,6 +92,9 @@ class PaperQuoteProvider:
             "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
             "price": str(entry),
             "symbol": setup.symbol,
+            "gas_usd": "0",
+            "fee_usd": "0",
+            "notional_usd": str(qty * entry),
         }
 
 

@@ -112,9 +112,18 @@ def run_cycle(app, now) -> None:
         decision = app.pipeline.decide(inputs)
         app.decision_journal.append(decision, now)
         if decision.intent is not None:
-            app.execution_coordinator.submit(
+            result = app.execution_coordinator.submit(
                 decision.intent, quote=prepared.quote, policy=prepared.risk,
             )
+            hook = getattr(app, "after_entry_submission", None)
+            if hook is not None:
+                hook(
+                    intent=decision.intent,
+                    result=result,
+                    quote=prepared.quote,
+                    risk=prepared.risk,
+                    now=now,
+                )
             break
     if app.watchlist.state.discovery_due(now):
         app.watchlist.mark_discovery(now)

@@ -65,7 +65,9 @@ class PaperExecutionAdapter:
             position_qty = Decimal(str(quote["quantity"]))
         self.positions.open_from_reconciliation(intent, position_qty)
         self.records.append(PaperExecutionRecord(
-            intent=intent, quote=quote, evidence={"simulated": True},
+            intent=intent,
+            quote=quote,
+            evidence={"simulated": True, "policy": policy},
         ))
         return "RECONCILED"
 
