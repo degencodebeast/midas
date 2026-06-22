@@ -108,6 +108,52 @@ def test_protective_exit_fires_while_entries_halted():
     assert executed[0][1].exit_quantity == Decimal("2")
 
 
+def test_per_position_failure_is_isolated_and_others_still_exit():
+    """A raise while processing one position must NOT abort the whole book.
+
+    Two open positions. The first raises (e.g. a registry miss building the live
+    sell command surfaces as a KeyError in ``observe``); the second is healthy and
+    must still get its protective exit executed. The failed position is recorded
+    via the fail-closed alert mechanism and remains in the book for a retry.
+    """
+    healthy = _Position(position_id="p-healthy", stressed_loss_per_unit=Decimal("1"))
+    failing = _Position(position_id="p-failing", stressed_loss_per_unit=Decimal("99"))
+    executed = []
+    alerts = []
+
+    def observe(p, now, reduction):
+        if p.position_id == "p-failing":
+            raise KeyError("unknown identity_key")
+        return LifecycleObservation(
+            None, None, PositionView(p.position_id, p.quantity, Decimal("90"), Decimal("120")),
+            Decimal("89"), Decimal("101"), False, reduction.reduction_qty, True,
+        )
+
+    book = [failing, healthy]
+    manager = PositionManager(
+        positions=lambda: list(book),
+        observe=observe,
+        evaluator=LifecycleEvaluator(), pipeline=DecisionPipeline(),
+        risk_policy=SimpleNamespace(reduction_for=lambda p, state: SimpleNamespace(reduction_qty=Decimal("0"))),
+        risk_state=lambda: PortfolioRiskState.example(),
+        sell_probe=lambda p, quantity: _Quote(True),
+        execute=lambda p, decision, quote: executed.append(p),
+        alert=lambda code, p: alerts.append((code, p.position_id)),
+    )
+
+    # Must not raise even though the highest-precedence position raises first.
+    count = manager.process_exits("2026-06-21T00:00:00Z")
+
+    # The healthy position still got its protective exit.
+    assert executed == [healthy]
+    assert count == 1
+    # The failed position is recorded fail-closed and never executed.
+    assert ("protective_exit_error", "p-failing") in alerts
+    assert failing not in executed
+    # The failed position remains in the book for a retry next cycle.
+    assert failing in manager.positions()
+
+
 def test_open_from_reconciliation_books_reconciled_quantity():
     """Positions open only from reconciliation, using the reconciled on-chain qty."""
     manager = PositionManager(

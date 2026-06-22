@@ -47,7 +47,7 @@ if ! echo "$TWAK_ADDRESS_JSON" | grep -qi "$WALLET_ADDRESS"; then
   exit 2
 fi
 
-twak wallet balance --json
+twak wallet balance --chain bsc --json
 echo "Verify BNB gas reserve and USDC/USDT trading capital manually before live."
 
 twak compete status --json

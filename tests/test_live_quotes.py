@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from magic_agent.live_quotes import TwakQuoteProvider
+from magic_agent.live_quotes import TwakQuoteProvider, _parse_amount
 from magic_agent.risk_policy import QuantityCaps
 from magic_agent.spot_models import AuthorizedSetup
 
@@ -178,6 +178,30 @@ def test_buy_quote_fails_closed_on_missing_required_field(missing):
 
 @pytest.mark.parametrize("bad", ["notanumber APE", "APE", "", "7.0"])
 def test_buy_quote_fails_closed_on_malformed_amount_string(bad):
+    twak = FakeTwak(_buy_payload(output=bad))
+    provider = _provider(twak)
+
+    result = provider(AuthorizedSetup.example(identity_key="zec-bsc"), Decimal("1"))
+
+    assert result.approved is False
+    assert result.quote is None
+
+
+@pytest.mark.parametrize("bad", ["NaN APE", "Infinity APE", "-Infinity APE"])
+def test_parse_amount_rejects_non_finite_amount(bad):
+    """Regression lock: ``_parse_amount`` must reject non-finite amounts.
+
+    ``Decimal("NaN")`` / ``Decimal("Infinity")`` parse successfully, so without the
+    ``is_finite()`` guard in ``live_quotes.py`` these would slip through. This locks
+    the guard in (fail closed with ValueError).
+    """
+    with pytest.raises(ValueError):
+        _parse_amount(bad)
+
+
+@pytest.mark.parametrize("bad", ["NaN APE", "Infinity APE", "-Infinity APE"])
+def test_buy_quote_fails_closed_on_non_finite_output(bad):
+    """The provider must reject a quote whose output amount is non-finite."""
     twak = FakeTwak(_buy_payload(output=bad))
     provider = _provider(twak)
 

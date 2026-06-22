@@ -94,24 +94,37 @@ class PositionManager:
         )
         exits_executed = 0
         for position in ordered:
-            reduction = self.risk_policy.reduction_for(position, self.risk_state())
-            observation = self.observe(position, now, reduction)
-            if observation is None:
-                # No protective-exit observation this cycle (the observe port could
-                # not assemble one — e.g. a position with no exit geometry, or no
-                # current price frame for its symbol). The position is retained for a
-                # later cycle; it is never dropped or assumed-closed.
+            # Per-position isolation: any error processing ONE position (e.g. a
+            # registry miss raising KeyError while building the live sell command)
+            # must never abort protective exits for the rest of the book. On error
+            # we record a fail-closed alert and continue; the failed position is
+            # left untouched in the source and retried next cycle.
+            try:
+                reduction = self.risk_policy.reduction_for(position, self.risk_state())
+                observation = self.observe(position, now, reduction)
+                if observation is None:
+                    # No protective-exit observation this cycle (the observe port could
+                    # not assemble one — e.g. a position with no exit geometry, or no
+                    # current price frame for its symbol). The position is retained for a
+                    # later cycle; it is never dropped or assumed-closed.
+                    continue
+                inputs = self.evaluator.evaluate(observation)
+                decision = self.pipeline.decide(inputs)
+                if decision.action != "risk_exit":
+                    continue
+                quote = self.sell_probe(position, decision.exit_quantity)
+                if quote is None or not quote.approved:
+                    self.alert("protective_exit_unquotable", position)
+                    continue
+                self.execute(position, decision, quote)
+                exits_executed += 1
+            except Exception:
+                # Fail closed for this position only: record the error and move on.
+                # Nothing is booked or mutated for the failed position — it stays in
+                # the book so a later cycle can retry it. The rest of the book's
+                # protective exits proceed unaffected.
+                self.alert("protective_exit_error", position)
                 continue
-            inputs = self.evaluator.evaluate(observation)
-            decision = self.pipeline.decide(inputs)
-            if decision.action != "risk_exit":
-                continue
-            quote = self.sell_probe(position, decision.exit_quantity)
-            if quote is None or not quote.approved:
-                self.alert("protective_exit_unquotable", position)
-                continue
-            self.execute(position, decision, quote)
-            exits_executed += 1
         return exits_executed
 
     def open_from_reconciliation(self, intent, position_qty: Decimal) -> ReconciledPosition:
