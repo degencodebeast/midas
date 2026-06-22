@@ -83,3 +83,37 @@ def test_cost_viability_denies_costs_that_dominate_tiny_trade():
 
     assert decision.approved is False
     assert decision.denied_by == ("round_trip_cost_too_high",)
+
+
+def test_cost_viability_fails_closed_on_nonfinite_numeric_field():
+    nan_decision = evaluate_cost_viability(
+        buy_quote=_quote(impact_bps="NaN"),
+        sell_quote=_quote(),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+    )
+
+    assert nan_decision.approved is False
+    assert "buy_malformed_impact_bps" in nan_decision.denied_by
+
+    inf_decision = evaluate_cost_viability(
+        buy_quote=_quote(slippage_bps="Infinity"),
+        sell_quote=_quote(),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00Z",
+    )
+
+    assert inf_decision.approved is False
+    assert "buy_malformed_slippage_bps" in inf_decision.denied_by
+
+
+def test_cost_viability_handles_naive_now_without_crash():
+    decision = evaluate_cost_viability(
+        buy_quote=_quote(),
+        sell_quote=_quote(),
+        intended_risk_fraction=Decimal("0.005"),
+        now="2026-06-22T12:00:00",
+    )
+
+    assert decision.approved is True
+    assert decision.denied_by == ()

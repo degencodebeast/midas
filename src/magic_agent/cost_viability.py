@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -31,15 +31,22 @@ _REQUIRED = {
 
 
 def _parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def _decimal(value: object, code: str, denied: list[str]) -> Decimal:
     try:
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         denied.append(code)
         return Decimal("0")
+    if not parsed.is_finite():
+        denied.append(code)
+        return Decimal("0")
+    return parsed
 
 
 def _validate_quote(name: str, quote: dict | None, now: str, denied: list[str]) -> dict[str, Decimal]:
@@ -54,7 +61,7 @@ def _validate_quote(name: str, quote: dict | None, now: str, denied: list[str]) 
     try:
         if _parse_time(str(quote["expires_at"])) <= _parse_time(now):
             denied.append(f"{name}_quote_expired")
-    except ValueError:
+    except (ValueError, TypeError):
         denied.append(f"{name}_malformed_expires_at")
     values = {
         "output_qty": _decimal(quote["output_qty"], f"{name}_malformed_output_qty", denied),
