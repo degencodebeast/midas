@@ -10,10 +10,11 @@ and returns `None` on failure; policy is fail-closed.
 runnable** (294 tests pass). `uv run magic-agent run --executor paper --max-iters 1`
 completes an offline cycle with exit code 0 — no network, no funds, no signing
 (uses `FixtureCmcClient` + `FixtureFrameSource`). The offline paper feed monitors
-the fixtured symbol set (ZEC fixture committed); live wiring restores the full
-pinned set and real gate.io data (`--extra live`). Live execution
-(`--executor twak`) is still a `NotImplementedError` stub pending live wiring
-(x402 hardening, `git+https` scanner pin, bnbagent-sdk surface validation). See
+the fixtured symbol set (ZEC fixture committed); `--live-frames --live-cmc` restore
+the full Track-1 universe on real gate.io + CoinMarketCap data. Live execution
+(`--executor twak --live-frames --live-cmc`) IS wired and **signs real BSC swaps**
+via TWAK — operator-gated (requires the live secrets + a funded wallet + explicit
+`--executor twak`) and supervised-canary-proven; never run it without those. See
 [`docs/track1-spot-runbook.md`](docs/track1-spot-runbook.md) for the activation runbook
 and known limitations.
 
@@ -141,14 +142,14 @@ will wire `PaperExecutionAdapter` (simulated fills, no funds, full decision logg
 Live execution (`--executor twak`) is an explicit opt-in and requires completing every
 gate in the [activation runbook](docs/track1-spot-runbook.md) first.
 
-**Note:** paper mode is fully runnable as of commit `65c32cd`. Live mode
-(`--executor twak`) remains a `NotImplementedError` stub — all activation gates in
-the [runbook](docs/track1-spot-runbook.md) must be met before live is wired.
+**Note:** paper mode is fully runnable. Live mode (`--executor twak --live-frames
+--live-cmc`) is wired and **signs real BSC swaps** via TWAK — gate it behind the live
+secrets + a funded wallet and the [runbook](docs/track1-spot-runbook.md) checks before use.
 
 ```bash
 uv run magic-agent run                           # paper (default — offline, no funds, no signing)
 uv run magic-agent run --executor paper --max-iters 1  # paper single-cycle smoke test
-uv run magic-agent run --executor twak           # live — NOT YET FUNCTIONAL (stub, raises NotImplementedError)
+uv run magic-agent run --executor twak --live-frames --live-cmc  # LIVE — signs real BSC swaps (requires live env + funded wallet)
 ```
 
 ### Authority model

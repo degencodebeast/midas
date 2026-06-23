@@ -253,13 +253,17 @@ path) must expose the following fields. Operators should monitor all of them:
 The following limitations are accepted and must be understood before live activation.
 They do NOT block paper mode but are material for live operation.
 
-**(a) Live (`--executor twak`) end-to-end is not yet wired or tested.**
-`cli._cmd_run()` assembles the full spot runtime app and runs paper mode now — a bare
-`magic-agent run` (paper default) paces one cycle per closed H1 bar via the
-bar-close-aligned clock (no busy-spin). Paper mode (`--executor paper`) is the validated
-surface exercised by tests and the paper cycle gate. Live wiring (`--executor twak`)
-still routes through the TWAK/coordinator path that is not yet exercised end-to-end; do
-not attempt live trading until that path is validated.
+**(a) Live (`--executor twak --live-frames --live-cmc`) IS wired and signs real BSC swaps.**
+`cli._cmd_run()` assembles the full spot runtime app; both paper and live modes pace one
+cycle per closed H1 bar via the bar-close-aligned clock (no busy-spin). The live path
+(scanner → RiskPolicy → TWAK coordinator → on-chain swap → reconcile) has been exercised
+end-to-end by a supervised canary on a funded BSC wallet, and is operator-gated (requires
+the live secrets + a funded wallet + explicit `--executor twak`). REMAINING live
+limitations before UNATTENDED operation: chain-position-rebuild on restart is not yet
+wired — a crash/restart or a cross-machine (local→VPS) handoff with an open position can
+re-enter, so run on ONE machine (or copy `.magic_agent/twak/`) until that lands; and sell
+idempotency on a lost-response edge is pending. Supervised single-cycle
+(`--max-iters 1`) live runs are safe; unattended looping needs those two items.
 
 **(b) x402 budget hardening is pending.**
 The current `X402Client` enforces a per-request and daily budget, but it does NOT yet:
