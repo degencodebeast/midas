@@ -25,24 +25,14 @@ as a commit-pinned dependency (bump the `rev` deliberately, then `uv lock`,
 to pick up newer scanner changes).
 
 **Current pin:** engine commit `5f92552e8fdd688808e2709eefc176ab681b7f4f`, declared
-as a machine-local `file://` source:
-
-```toml
-[tool.uv.sources]
-magic-scanner = { git = "file:///Users/.../trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
-```
-
-This means the sibling `../trading-scanner` checkout **must be present** on the same
-machine. The `file://` form is valid for local development but will fail on any other
-machine (VPS, CI, collaborators). Before deploying to a VPS: push commit `5f92552` to
-`github.com/degencodebeast/trading-scanner` and switch `pyproject.toml` to the
-`git+https` form:
+as a deployable `git+https` source (NOT a machine-local `file://` — so a clean
+VPS/CI install resolves the scanner from GitHub, no sibling checkout required):
 
 ```toml
 magic-scanner = { git = "https://github.com/degencodebeast/trading-scanner", rev = "5f92552e8fdd688808e2709eefc176ab681b7f4f" }
 ```
 
-Then run `uv lock` and commit both files. That repo is **private**, so a clean VPS/CI
+That repo is **private**, so a clean VPS/CI
 install needs a **read-only GitHub token** (a fine-grained PAT with Contents: read on
 `trading-scanner`) configured via git's credential helper / `url.insteadOf` — **never**
 embedded in the pinned URL or committed. See Known limitation (d) in
@@ -102,9 +92,9 @@ honestly to `status="unavailable"`, and the deterministic scanner path stands on
 
 ### Local dev: editable sibling scanner
 
-The committed pin is already a `file://` local source, so `uv sync` resolves the
-scanner from the sibling `../trading-scanner` checkout at the pinned commit. If you
-want a fully editable (live-code) install instead, run:
+The committed pin is a `git+https` source, so `uv sync` resolves the scanner from
+GitHub at the pinned commit (works on any machine). If you want a fully editable
+(live-code) install against your local sibling checkout instead, run:
 
 ```bash
 uv sync

@@ -227,3 +227,14 @@ def test_deferred_items_stay_honestly_deferred_not_overclaimed():
     assert "x402 budget hardening is pending" in runbook
     # The advisor stays OFF-by-default / deferred wording somewhere.
     assert "deferred" in runbook
+
+
+def test_readme_describes_scanner_pin_as_deployable_git_https_not_stale_file_url():
+    # The committed scanner pin is git+https (deployable on any machine). Guard that
+    # the README does not regress to claiming the CURRENT pin is a machine-local
+    # file:// source (which would mislead a VPS operator into needing a sibling checkout).
+    readme = _doc_text("README.md")
+    assert 'git = "https://github.com/degencodebeast/trading-scanner"' in readme
+    assert "file:///Users/" not in readme
+    assert "already a `file://` local source" not in readme
+    assert "machine-local `file://` source:" not in readme
