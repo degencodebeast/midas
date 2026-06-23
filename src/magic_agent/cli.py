@@ -18,10 +18,15 @@ import argparse
 import logging
 import sys
 
-from magic_agent.status_store import DEFAULT_STATUS_PATH
-
 # Default CMC API base. Overridable via MAGIC_AGENT_CMC_BASE_URL.
 DEFAULT_CMC_BASE_URL = "https://pro-api.coinmarketcap.com"
+
+# `run` now writes a PER-MODE status snapshot (.magic_agent/<mode>/status.json), so the
+# old shared status_store.DEFAULT_STATUS_PATH (".magic_agent/status.json") is never
+# written by a per-mode run. `serve` defaults to the LIVE (twak) per-mode path so the
+# dashboard reflects a live run out of the box; pass `--status .magic_agent/paper/status.json`
+# for a paper run.
+DEFAULT_LIVE_STATUS_PATH = ".magic_agent/twak/status.json"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -65,6 +70,15 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     sv.add_argument("--log", default=".magic_agent/decisions.jsonl",
                     help="Path to the JSONL decision log (default: .magic_agent/decisions.jsonl)")
+    # Live status snapshot path. `run` writes a PER-MODE snapshot
+    # (.magic_agent/<mode>/status.json), so the default points at the LIVE (twak) path
+    # — NOT the old shared .magic_agent/status.json (which a per-mode run never writes,
+    # leaving serve stuck on the demo fallback). For a paper dashboard, pass
+    # `--status .magic_agent/paper/status.json`.
+    sv.add_argument("--status", default=DEFAULT_LIVE_STATUS_PATH,
+                    help="Path to the live status snapshot written by `run` "
+                         "(default: .magic_agent/twak/status.json — the live per-mode path; "
+                         "use .magic_agent/paper/status.json for a paper run)")
     sv.set_defaults(func=_cmd_serve)
 
     return parser
@@ -130,7 +144,7 @@ def _cmd_run(args: argparse.Namespace) -> None:
     run_live(app, clock=clock, max_iters=getattr(args, "max_iters", None))
 
 
-def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,
+def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_LIVE_STATUS_PATH,
                     status_provider=None):
     """Build and return the read-only FastAPI app for the dashboard.
 
@@ -139,11 +153,13 @@ def build_serve_app(*, log_path: str, snapshot_path: str = DEFAULT_STATUS_PATH,
     log_path:
         Path to the JSONL decision log (passed to ``create_app``).
     snapshot_path:
-        Path to the live status snapshot written by ``magic-agent run``
-        (default ``status_store.DEFAULT_STATUS_PATH`` — same file ``run`` writes).
-        The default provider READS this file so ``serve`` reflects the live
-        loop's latest state (cross-process). When the file is absent it returns a
-        clearly-labelled demo fallback (mode ``"demo"``).
+        Path to the live status snapshot written by ``magic-agent run`` — which now
+        writes a PER-MODE snapshot (``.magic_agent/<mode>/status.json``). Defaults to
+        the LIVE (twak) per-mode path (:data:`DEFAULT_LIVE_STATUS_PATH`); pass
+        ``.magic_agent/paper/status.json`` for a paper run. The default provider READS
+        this file so ``serve`` reflects the live loop's latest state (cross-process).
+        When the file is absent it returns a clearly-labelled demo fallback
+        (mode ``"demo"``).
     status_provider:
         A zero-argument callable returning a ``build_status``-shaped dict.
         When ``None``, the snapshot-reading provider above is used.
@@ -195,7 +211,10 @@ def _cmd_serve(args: argparse.Namespace) -> None:  # pragma: no cover
     # configure console logging here too so the operator gets consistent, visible
     # INFO output across both subcommands.
     _configure_console_logging(verbose=getattr(args, "verbose", False))
-    app = build_serve_app(log_path=args.log)
+    app = build_serve_app(
+        log_path=args.log,
+        snapshot_path=getattr(args, "status", DEFAULT_LIVE_STATUS_PATH),
+    )
     uvicorn.run(app, host=args.host, port=args.port)
 
 

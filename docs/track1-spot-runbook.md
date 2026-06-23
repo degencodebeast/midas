@@ -120,24 +120,29 @@ confirmed it. Do not mark items speculatively.
       into the live `app.risk_policy`.
 - [ ] `runner.run_cycle` raises `RuntimeError("mandatory RiskPolicy is missing")` when
       `app.risk_policy is None` — verify this path is NOT bypassed.
-- [ ] Default `RiskConfig.defaults()` values are confirmed:
-      - `canary_risk_fraction = 0.0025` (0.25 %)
-      - `a_grade_risk_fraction = 0.005` (0.5 %)
-      - `b_grade_risk_fraction = 0.0025` (0.25 %)
+- [ ] Default `RiskConfig.defaults()` values are confirmed (FIXED-MARGIN sizing — the
+      position is a fixed % of EQUITY; the scanner stop is exit geometry only, used for
+      risk tracking + the safety ceilings, NOT to size the position):
+      - `canary_margin_fraction = 0.05` (5 % — canary upper bound)
+      - `a_grade_margin_fraction = 0.05` (5 %)
+      - `b_grade_margin_fraction = 0.025` (2.5 %)
       - `counter_bias_multiplier = 0.50`
-      - `drawdown_throttle_multiplier = 0.50`
-      - `max_open_risk = 0.01` (1 %)
-      - `max_correlation_bucket_risk = 0.01` (1 %)
-      - `max_concurrent_positions = 1`
-      - `hard_max_concurrent_positions = 2`
-      - `max_token_fraction = 0.25`
-      - `stable_reserve_fraction = 0.30`
-      - `daily_loss_fraction = 0.015` (1.5 %)
+      - `max_open_risk = 0.06` (6 % — stop-derived open-risk ceiling)
+      - `max_correlation_bucket_risk = 0.06` (6 %)
+      - `max_concurrent_positions = 3`
+      - `hard_max_concurrent_positions = 3`
+      - `max_token_fraction = 0.50`
+      - `stable_reserve_fraction = 0.015` (1.5 %)
+      - `daily_loss_fraction = 0.10` (10 %)
       - `consecutive_stop_halt = 3`
-      - `drawdown_throttle = 0.03` (3 %)
-      - `drawdown_entry_halt = 0.05` (5 %)
-      - `drawdown_review = 0.08` (8 %)
-      - `hard_drawdown_dq = 0.30` (30 %)
+      - Graduated drawdown ladder (strictly ordered):
+        - `drawdown_throttle = 0.05` (5 %) → margin × `drawdown_throttle_multiplier = 0.50`,
+          A+B, max `drawdown_throttle_max_positions = 2`
+        - `drawdown_defense = 0.10` (10 %) → margin × `drawdown_defense_multiplier = 0.25`,
+          A-only, max `drawdown_defense_max_positions = 1`
+        - `drawdown_entry_halt = 0.15` (15 %) → block all new entries (exits continue)
+        - `drawdown_hard_review = 0.20` (20 %) → deny new entries, operator review
+        - `hard_drawdown_dq = 0.30` (30 %) → hard disqualification
 
 ### 3.8  Gas reserve
 
@@ -179,8 +184,8 @@ confirmed it. Do not mark items speculatively.
 
 ### 3.12  State backup
 
-- [ ] `.magic_agent/state.json` (or the configured state-journal path) has been backed
-      up to a timestamped copy before live activation.
+- [ ] `.magic_agent/twak/state.json` (the live per-mode state-journal path; or the
+      configured path) has been backed up to a timestamped copy before live activation.
 - [ ] `state_journal` records peak equity, daily anchor, current positions, and risk
       state; these survive restart (atomic integrity-protected write confirmed by tests).
 - [ ] Peak equity is initialized from actual wallet balance, NOT from a hardcoded
@@ -203,31 +208,38 @@ confirmed it. Do not mark items speculatively.
 - [ ] Live activation command:
 
   ```bash
-  uv run magic-agent run --executor twak
+  # Live loop (omit --max-iters to run unbounded, paced to closed H1 bars):
+  uv run magic-agent run --executor twak --live-frames --live-cmc
   ```
 
-- [ ] The first live order uses `canary_risk_fraction = 0.0025` (0.25 %) and
-      `max_concurrent_positions = 1`. Do NOT increase these limits until causal
-      replay evidence justifies it.
+  The `--live-frames --live-cmc` flags are REQUIRED for live: without them the loop
+  scans only the committed offline fixture (ZEC) instead of the real Track-1 universe.
+
+- [ ] The first live order is sized by the canary cap `canary_margin_fraction = 0.05`
+      (a 5 % margin upper bound, applied while in canary mode) under
+      `max_concurrent_positions = 3`. Do NOT raise these limits until causal replay
+      evidence justifies it.
 
 ---
 
 ## Operational status display
 
-The runtime status (`.magic_agent/status.json`, surfaced by `magic-agent serve`)
-must expose the following fields. Operators should monitor all of them:
+The runtime status (the per-mode snapshot — live writes `.magic_agent/twak/status.json`,
+paper `.magic_agent/paper/status.json` — surfaced by `magic-agent serve` pointed at that
+path) must expose the following fields. Operators should monitor all of them:
 
 | Field | Meaning |
 |---|---|
-| `grade_fraction` | Effective risk fraction applied to this setup (A vs B grade). |
-| `counter_bias_multiplier` | Scaling factor applied when `bias_alignment == "counter_bias"` (default 0.50). Counter-bias requires positive top-quartile 7-day momentum; denied otherwise. |
-| `drawdown_throttle` (3 %) | Risk fraction halved when peak-to-current drawdown ≥ 3 %. Entries still permitted. |
-| `drawdown_entry_halt` (5 %) | New entries blocked when drawdown ≥ 5 %. Exits continue unconditionally. |
-| `drawdown_review` (8 %) | Emergency review threshold: entries blocked, operator intervention required. |
-| `daily_loss_halt` (1.5 %) | New entries blocked when realized daily loss ≥ 1.5 % of daily anchor equity. |
+| `grade_fraction` | Effective MARGIN fraction (deploy-% of equity) applied to this setup. A-grade 5 %, B-grade 2.5 % (fixed-margin sizing — the scanner stop does NOT size the position). |
+| `counter_bias_multiplier` | Scaling factor applied to the margin % when `bias_alignment == "counter_bias"` (default 0.50). Counter-bias requires positive top-quartile 7-day momentum; denied otherwise. |
+| `drawdown_throttle` (5 %) | Margin halved (×0.50), max 2 positions (A+B), when peak-to-current drawdown ≥ 5 %. Entries still permitted. |
+| `drawdown_defense` (10 %) | Margin × 0.25, A-grade only, max 1 position, when drawdown ≥ 10 %. Entries still permitted. |
+| `drawdown_entry_halt` (15 %) | New entries blocked when drawdown ≥ 15 %. Exits continue unconditionally. |
+| `drawdown_hard_review` (20 %) | Emergency review threshold: entries blocked, operator intervention required. |
+| `daily_loss_halt` (10 %) | New entries blocked when realized daily loss ≥ 10 % of daily anchor equity. |
 | `consecutive_stop_halt` (3 stops) | New entries blocked after 3 consecutive stop-outs. |
-| `correlation_utilization` | Current correlated-bucket stressed loss as a fraction of the 1 % bucket cap. |
-| `open_risk_utilization` | Current total open stressed loss as a fraction of the 1 % open-risk cap. |
+| `correlation_utilization` | Current correlated-bucket stressed loss as a fraction of the 6 % bucket cap. |
+| `open_risk_utilization` | Current total open stressed loss as a fraction of the 6 % open-risk cap. |
 | `stale_equity` | `True` when equity data is older than the allowed TTL. Entries are denied; exits continue. |
 | `scanner_raw_grade` | Frozen engine grade from the scanner (`raw_grade`); immutable audit field. |
 | `scanner_effective_grade` | Scanner-owned effective grade used by RiskPolicy (`grade`). May differ from `raw_grade` when scanner applies a promotion. |
@@ -299,15 +311,16 @@ with a `file://` source.
 ```bash
 # Restart with paper executor to inspect state without risking new orders.
 uv run magic-agent run --executor paper
-# Confirm position and stop level in .magic_agent/status.json, then
+# Confirm position and stop level in .magic_agent/twak/status.json (live; paper writes
+# .magic_agent/paper/status.json), then
 # use twak directly to execute a manual sell if the position manager fails.
 twak swap <qty> <token-contract> USDC --chain bsc --yes
 ```
 
-**State inspection:**
+**State inspection (per-mode tree — twak = live, paper = paper):**
 ```bash
-cat .magic_agent/status.json
-cat .magic_agent/decisions.jsonl | tail -20
+cat .magic_agent/twak/status.json
+cat .magic_agent/twak/decisions.jsonl | tail -20
 ```
 
 **If `BROADCAST_UNKNOWN` state is detected:**
@@ -341,9 +354,9 @@ Prerequisites:
 
 Canary observation sequence:
 
-1. Start with `magic-agent run --executor twak --max-iters 1` under direct operator supervision.
+1. Start with `magic-agent run --executor twak --live-frames --live-cmc --max-iters 1` under direct operator supervision.
 2. Confirm a scanner-authorized setup exists.
-3. Confirm RiskPolicy caps the first live entry to `canary_risk_fraction = 0.0025`.
+3. Confirm RiskPolicy caps the first live entry to the canary margin cap (`canary_margin_fraction = 0.05`).
 4. Confirm TWAK quote is fresh and exact-size.
 5. Confirm TWAK submit returns a transaction hash.
 6. Confirm the chain receipt reaches the required confirmations.
@@ -386,11 +399,11 @@ run autonomously.
 
 ## Track 1 Live Canary To Scoring Run
 
-The first `magic-agent run --executor twak` activation uses a mandatory first live canary. The canary is a supervised safety gate, not the scoring mode.
+The first `magic-agent run --executor twak --live-frames --live-cmc` activation uses a mandatory first live canary. The canary is a supervised safety gate, not the scoring mode.
 
 Canary rules:
 
-- `canary_risk_fraction = 0.0025`
+- the canary margin cap `canary_margin_fraction = 0.05` bounds the deploy while in canary mode (fixed-margin sizing — the scanner stop is exit geometry only)
 - scanner authorization is still required
 - RiskPolicy approval is still required
 - exact-size TWAK quote is required
@@ -401,8 +414,8 @@ Canary rules:
 Promotion rules:
 
 - after a reconciled canary and passing cost viability, the runtime may promote to normal scoring mode
-- normal scoring uses RiskPolicy sizing: A-family aligned up to 0.50%, B-family aligned up to 0.25%, counter-bias with the 0.50x multiplier
-- hard-DQ, daily halt, drawdown throttle, concurrency cap, token cap, stable reserve, stale equity, and consecutive-stop halt remain active
+- normal scoring uses RiskPolicy fixed-MARGIN sizing: A-grade deploys 5% of equity, B-grade 2.5%, counter-bias with the 0.50x multiplier; the scanner stop is exit geometry only (risk = deploy × stop%)
+- hard-DQ, daily halt, the graduated drawdown ladder (throttle→defense→entry_halt→hard_review→DQ), concurrency cap (max 3), token cap, stable reserve, stale equity, and consecutive-stop halt remain active
 
 Qualification:
 

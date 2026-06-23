@@ -1,11 +1,13 @@
 # magic-agent-serve.service — read-only API server (FastAPI)
 #
-# CRITICAL — shared working directory:
-#   magic-agent serve READS .magic_agent/status.json and .magic_agent/decisions.jsonl.
-#   magic-agent run WRITES those same files.
-#   Both services MUST share the same WorkingDirectory (/opt/midas).
-#   If WorkingDirectory differs, /api/status and /api/decisions will return stale
-#   or missing data — a silent footgun.
+# CRITICAL — shared working directory + PER-MODE status path:
+#   magic-agent run WRITES a PER-MODE snapshot: live => .magic_agent/twak/status.json,
+#   paper => .magic_agent/paper/status.json (plus decisions.jsonl).
+#   magic-agent serve READS the snapshot named by --status (below). It MUST point at the
+#   SAME per-mode path the run loop writes, or /api/status reverts to the demo fallback.
+#   Both services MUST also share the same WorkingDirectory (/opt/midas).
+#   This unit defaults --status to the LIVE (twak) path; for a paper dashboard, change it
+#   to --status .magic_agent/paper/status.json.
 #
 # The API binds to 127.0.0.1:8000 (NOT 0.0.0.0). The CLI default is 0.0.0.0,
 # but on a VPS the API must be private and reachable only through the reverse
@@ -32,8 +34,11 @@ EnvironmentFile=/opt/midas/.env
 
 # --host 127.0.0.1 is REQUIRED on a VPS so the API binds privately (REQ-015).
 # The CLI default (--host 0.0.0.0) would expose the API directly to the internet.
+# --status points at the LIVE per-mode snapshot the canonical run unit
+# (deploy/midas-agent.service, --executor twak) writes; use
+# .magic_agent/paper/status.json to serve a paper run instead.
 # Adjust the path to uv if it is installed elsewhere (e.g. ~/.local/bin/uv).
-ExecStart=/usr/local/bin/uv run magic-agent serve --host 127.0.0.1 --port 8000
+ExecStart=/usr/local/bin/uv run magic-agent serve --host 127.0.0.1 --port 8000 --status .magic_agent/twak/status.json
 
 Restart=on-failure
 RestartSec=5

@@ -26,8 +26,42 @@ def test_runbook_documents_live_canary_to_scoring_process():
     text = Path("docs/track1-spot-runbook.md").read_text(encoding="utf-8")
 
     assert "mandatory first live canary" in text
-    assert "canary_risk_fraction = 0.0025" in text
+    # Fixed-MARGIN risk model (NOT the old stop-derived canary_risk_fraction=0.0025).
+    assert "canary_margin_fraction = 0.05" in text
+    assert "fixed-margin" in text.lower()
     assert "promote to normal scoring mode" in text
     assert "minimum trade-count pace" in text
     assert "cost viability" in text
     assert "smart-money and LLM supervisor are deferred" in text
+
+
+def test_runbook_documents_fixed_margin_model_and_drawdown_ladder():
+    from pathlib import Path
+
+    text = Path("docs/track1-spot-runbook.md").read_text(encoding="utf-8")
+
+    # The corrected fixed-MARGIN defaults (RiskConfig.defaults()).
+    assert "a_grade_margin_fraction = 0.05" in text
+    assert "b_grade_margin_fraction = 0.025" in text
+    assert "max_concurrent_positions = 3" in text
+    # The graduated drawdown ladder thresholds.
+    assert "drawdown_throttle = 0.05" in text
+    assert "drawdown_defense = 0.10" in text
+    assert "drawdown_entry_halt = 0.15" in text
+    assert "drawdown_hard_review = 0.20" in text
+    assert "hard_drawdown_dq = 0.30" in text
+    # The OLD stale model must be gone.
+    assert "canary_risk_fraction = 0.0025" not in text
+    assert "max_concurrent_positions = 1" not in text
+
+
+def test_readme_documents_fixed_margin_model():
+    from pathlib import Path
+
+    text = Path("README.md").read_text(encoding="utf-8")
+
+    assert "fixed-MARGIN sizing" in text
+    assert "a_grade_margin_fraction = 0.05" in text
+    assert "max_concurrent_positions = 3" in text
+    assert "canary_risk_fraction = 0.0025" not in text
+    assert "one concurrent\nposition" not in text and "one concurrent position" not in text

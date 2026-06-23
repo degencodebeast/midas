@@ -1,18 +1,27 @@
 [Unit]
-Description=MIDAS Track-1 spot agent
+# CANONICAL LIVE unit — the ONE unit for live (twak) trading. The poll-loop writer; its
+# per-mode journal/status tree lives under WorkingDirectory/.magic_agent/twak/. The
+# read-only API is magic-agent-serve.service (point its --status at the twak snapshot).
+# (For a PAPER-only loop with no funds use deploy/systemd/magic-agent-run.service.)
+Description=MIDAS Track-1 spot agent (LIVE / twak)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=midas
+# Live per-mode state/journals/status land under /opt/midas/.magic_agent/twak/ — must
+# match magic-agent-serve.service's WorkingDirectory + --status path.
 WorkingDirectory=/opt/midas
 # live ports must exist and the operator must approve before enabling this unit.
-# /etc/midas/agent.env must be root-owned chmod 600 and contain:
-# TWAK_ACCESS_ID, TWAK_HMAC_SECRET, TWAK_WALLET_PASSWORD, WALLET_ADDRESS,
-# BSC_RPC_URL, CMC_API_KEY.
+# /etc/midas/agent.env must be root-owned chmod 600 and contain (see deploy/.env.example,
+# app.py _require_live_env): TWAK_ACCESS_ID, TWAK_HMAC_SECRET, TWAK_WALLET_PASSWORD,
+# BSC_RPC_URL, CMC_API_KEY, WALLET_ADDRESS.
 EnvironmentFile=/etc/midas/agent.env
-ExecStart=/opt/midas/.venv/bin/magic-agent run --executor twak
+# REAL live loop: --live-frames + --live-cmc are REQUIRED — without them the loop scans
+# only the committed offline fixture (ZEC) instead of the real Track-1 universe. Omit
+# --max-iters to run the unbounded loop (paced to closed H1 bars).
+ExecStart=/opt/midas/.venv/bin/magic-agent run --executor twak --live-frames --live-cmc
 Restart=on-failure
 RestartSec=10
 

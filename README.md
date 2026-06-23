@@ -117,15 +117,20 @@ form at the pushed `5f92552` commit (see Install section above).
 
 ## Shared local state
 
-`magic-agent run` and `magic-agent serve` communicate through files under
-`.magic_agent/` in the working directory:
+`magic-agent run` and `magic-agent serve` communicate through files under a **per-mode**
+journal tree in the working directory — paper writes under `.magic_agent/paper/`, live
+(twak) under `.magic_agent/twak/`:
 
 ```text
-.magic_agent/status.json
-.magic_agent/decisions.jsonl
+.magic_agent/twak/status.json      # live status snapshot (run --executor twak)
+.magic_agent/twak/decisions.jsonl
+.magic_agent/paper/status.json     # paper status snapshot (run --executor paper)
+.magic_agent/paper/decisions.jsonl
 ```
 
-Both processes must run with the same working directory.
+Both processes must run with the same working directory. `serve` defaults to the live
+per-mode status path; point it at the paper path with `magic-agent serve --status
+.magic_agent/paper/status.json` to view a paper run (see `serve --status`).
 
 ## Track 1 spot runtime
 
@@ -158,10 +163,42 @@ uv run magic-agent run --executor twak           # live — NOT YET FUNCTIONAL (
   balance-delta reconciliation. An unconfirmed or mismatched receipt blocks new
   exposure.
 
-### First live order
+### Risk model (fixed-margin sizing)
 
-The first live order uses `canary_risk_fraction = 0.0025` (0.25 %) and one concurrent
-position. These limits must not be raised until causal replay evidence justifies it.
+Track 1 uses **fixed-MARGIN sizing**, not stop-derived risk sizing. Each entry deploys a
+fixed fraction of EQUITY as notional; the scanner stop is **exit geometry only** (used for
+risk tracking + the safety ceilings, never to size the position). Per-trade risk is an
+OUTPUT: `risk = deploy_notional × stop_distance%`. The actual values
+(`RiskConfig.defaults()` in `src/magic_agent/risk_policy.py`):
+
+- **A-grade** deploys `a_grade_margin_fraction = 0.05` (5 % of equity); **B-grade** deploys
+  `b_grade_margin_fraction = 0.025` (2.5 %); the canary cap is `canary_margin_fraction = 0.05`
+  (an upper bound, applied only when in canary mode).
+- **Counter-bias** keeps the `counter_bias_multiplier = 0.50` (applied to the margin %),
+  and requires positive top-quartile 7-day momentum or it is denied.
+- **Concurrency:** `max_concurrent_positions = 3` (= `hard_max_concurrent_positions`), so
+  max deployed ≈ 3 × 5 % = 15 % of equity (A-only). No separate open-risk-from-margin cap —
+  concurrency × margin bounds it naturally.
+- **Safety ceilings** still bind on the stop-derived risk: `max_open_risk = 0.06`,
+  `max_correlation_bucket_risk = 0.06`, `daily_loss_fraction = 0.10`,
+  `stable_reserve_fraction = 0.015`, `consecutive_stop_halt = 3`. A pathologically wide stop
+  can still TRIM or deny via the open-risk / correlation-bucket / daily-loss caps.
+
+These limits must not be raised until causal replay evidence justifies it.
+
+### Graduated drawdown ladder
+
+`drawdown = (peak_equity − equity) / peak_equity`, applied highest-band-first (see
+`RiskConfig.defaults()`). Protective EXITS always run; only NEW entries are gated:
+
+| Band | Threshold | Effect |
+|---|---|---|
+| Normal | `< 0.05` | margin ×1, A+B grades, full concurrency (3) |
+| Throttle | `≥ drawdown_throttle = 0.05` | margin × `0.50`, A+B, max **2** positions |
+| Defense | `≥ drawdown_defense = 0.10` | margin × `0.25`, **A-only**, max **1** position |
+| Entry halt | `≥ drawdown_entry_halt = 0.15` | block ALL new entries (exits continue) |
+| Hard review | `≥ drawdown_hard_review = 0.20` | deny new entries, operator review required |
+| Hard DQ | `≥ hard_drawdown_dq = 0.30` | hard disqualification — all entries denied |
 
 ### Activation runbook
 
