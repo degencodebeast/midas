@@ -250,3 +250,10 @@ def test_readme_uses_correct_live_cmc_env_and_no_stale_test_count():
     assert "MAGIC_AGENT_CMC_API_KEY" not in readme
     # A hard-coded "<n> tests pass" count always goes stale — keep it count-agnostic.
     assert not re.search(r"\d+\s+tests pass", readme), "README has a stale hard-coded test count"
+    # The live CMC section must describe the REAL client (universe ranking, fail-closed),
+    # not the dead Fear&Greed observe-only-returns-None prose.
+    assert "Fear & Greed" not in readme, "README still describes the obsolete CMC Fear&Greed client"
+    assert "the factory returns `None`" not in readme, "README still claims live CMC graceful-degrades on missing key"
+    assert "CoinMarketCapClient" in readme
+    assert "/v2/cryptocurrency/quotes/latest" in readme
+    assert "cmc_missing" in readme  # the real client excludes symbols from the scan

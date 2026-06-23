@@ -65,31 +65,29 @@ Note: the production wiring against the SDK's real `ERC8004Agent` API is still
 pending, so identity currently stays `unregistered` even with the extra
 installed — this is intentional and honest, not a silent failure.
 
-### Live context (CMC)
+### Live CMC universe data (`--live-cmc`)
 
-The agent can wire a **real** CoinMarketCap client into the live context path, gated
-on env config:
+In live mode the agent wires a real `CoinMarketCapClient` (replacing the offline
+`FixtureCmcClient`) to fetch rank + momentum for the Track-1 universe:
 
-- `CMC_API_KEY` — CoinMarketCap API key. Required for live mode (it is in
-  `_require_live_env`); `--live-cmc` wires the real `CoinMarketCapClient` from it, and
-  the build fails closed if it is absent. (The base URL `https://pro-api.coinmarketcap.com`
-  is a client default, not an env override in the live build path.)
+- `CMC_API_KEY` — CoinMarketCap API key. **Required** for live mode (it is in
+  `_require_live_env`); `--live-cmc` builds the client from it and the build **fails
+  closed** if it is absent — there is no silent fixture fallback (`_require_live_env`
+  raises, and `CoinMarketCapClient` raises on an empty key). The base URL
+  `https://pro-api.coinmarketcap.com` is a client default, not an env override.
 
-**Configured** (key present): a real authenticated client is wired in. On each context
-fetch it issues one GET (10s timeout) to the CMC Fear & Greed endpoint and **logs** the
-raw reading (`magic_agent.cmc` logger, INFO). Any fetch error or timeout degrades the
-context to `status="unavailable"` (the loop never blocks on CMC). However, this runs in
-**observe-only** mode — it does
-**not** gate trades. The client deliberately feeds the decision gate a non-vetoing
-`regime="neutral", risk_flag="low"` context regardless of the Fear & Greed value. The
-mapping from a CMC reading to a `regime`/`risk_flag` veto is a deliberate, **deferred**
-trading-policy decision to be validated against real observations before it can influence
-sizing or vetoes. So today: CMC is fetched and surfaced, the deterministic scanner path
-remains authoritative, and CMC does **not** yet gate trades.
+On each cycle the client issues a batched `GET /v2/cryptocurrency/quotes/latest` (by CMC
+symbol, disambiguated by the BSC contract address) and normalizes `percent_change_7d/30d`
++ `cmc_rank` into `CmcCandidateSource`. This **does affect the scan**: it ranks momentum
+and **excludes** symbols it cannot resolve (`cmc_missing`, ambiguous-symbol, stale) from
+the live universe, and supplies the momentum the RiskPolicy counter-bias gate reads.
 
-**Unconfigured** (no key): the factory returns `None`, the context adapter degrades
-honestly to `status="unavailable"`, and the deterministic scanner path stands on its own
-(unavailable context is a full passthrough — no veto, no boost).
+**Authority boundary:** CMC is **observe / veto / rank only** — it never *authorizes* a
+setup (the scanner is the sole setup authority). It is fail-**soft** on a transient fetch
+error (the affected symbols journal `cmc_unavailable` / `cmc_missing` and are skipped that
+cycle; momentum is never fabricated) — but the **key itself is required** at live startup
+(fail-closed), so a missing `CMC_API_KEY` is a hard startup failure, not graceful
+degradation.
 
 ### Local dev: editable sibling scanner
 
