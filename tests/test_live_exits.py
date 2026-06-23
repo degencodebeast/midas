@@ -3,9 +3,20 @@ from types import SimpleNamespace
 
 import pytest
 
-from magic_agent.live_exits import TwakSellPorts
+from magic_agent.live_exits import TwakSellPorts, sell_intent_id_for
 from magic_agent.position_manager import ReconciledPosition
 from magic_agent.twak import TwakError
+
+
+@pytest.mark.parametrize("qa,qb", [("3.50", "3.5"), ("1E+2", "100"), ("2", "2.0")])
+def test_sell_intent_id_is_canonical_across_decimal_representations(qa, qb):
+    """The idempotency key must be byte-stable for the same value regardless of the
+    Decimal's scale/representation, so a restart-mid-exit reuses the identical id and
+    the journal blocks a second broadcast (no double-sell)."""
+    pos = SimpleNamespace(intent_id="intent:zec-bsc:2026-06-22T23:00:00Z")
+    da = SimpleNamespace(reason="stop", exit_quantity=Decimal(qa))
+    db = SimpleNamespace(reason="stop", exit_quantity=Decimal(qb))
+    assert sell_intent_id_for(pos, da) == sell_intent_id_for(pos, db)
 
 
 _APE = "0x8f86a15EC17cb3369d8b3E666dAdBC11daA82b79"

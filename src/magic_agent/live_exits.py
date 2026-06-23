@@ -21,7 +21,13 @@ def sell_intent_id_for(position, decision) -> str:
     a same-cycle / post-restart retry of the SAME exit collides and is blocked.
     """
     reason = getattr(decision, "reason", None) or "exit"
-    return f"sell:{position.intent_id}:{reason}:{decision.exit_quantity}"
+    # Canonicalize the quantity so the idempotency key is byte-stable regardless of the
+    # Decimal's scale/representation: the pre-exit qty (a token-delta) and a post-restart
+    # rebuilt qty (Decimal(str(on-chain balance))) can differ in FORM for the same value
+    # (3.50 vs 3.5, 1E+2 vs 100). format(normalize(), "f") collapses both → the same exit
+    # always yields the same key, so the journal reliably blocks a second broadcast.
+    qty_key = format(Decimal(str(decision.exit_quantity)).normalize(), "f")
+    return f"sell:{position.intent_id}:{reason}:{qty_key}"
 
 
 @dataclass(frozen=True)
