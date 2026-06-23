@@ -238,3 +238,15 @@ def test_readme_describes_scanner_pin_as_deployable_git_https_not_stale_file_url
     assert "file:///Users/" not in readme
     assert "already a `file://` local source" not in readme
     assert "machine-local `file://` source:" not in readme
+
+
+def test_readme_uses_correct_live_cmc_env_and_no_stale_test_count():
+    # The live app requires CMC_API_KEY (in _require_live_env); the old
+    # MAGIC_AGENT_CMC_API_KEY env is dead and must not be documented as the live key.
+    import re
+
+    readme = _doc_text("README.md")
+    assert "CMC_API_KEY" in readme
+    assert "MAGIC_AGENT_CMC_API_KEY" not in readme
+    # A hard-coded "<n> tests pass" count always goes stale — keep it count-agnostic.
+    assert not re.search(r"\d+\s+tests pass", readme), "README has a stale hard-coded test count"

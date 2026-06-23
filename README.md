@@ -7,7 +7,7 @@ and returns `None` on failure; policy is fail-closed.
 
 **Current status:** the production run-assembly (`App` + `build_app(mode)` +
 `cli._cmd_run` + `reconcile_unfinished`) is implemented and **paper mode is now
-runnable** (294 tests pass). `uv run magic-agent run --executor paper --max-iters 1`
+runnable** (the full `uv run pytest -q` suite passes). `uv run magic-agent run --executor paper --max-iters 1`
 completes an offline cycle with exit code 0 — no network, no funds, no signing
 (uses `FixtureCmcClient` + `FixtureFrameSource`). The offline paper feed monitors
 the fixtured symbol set (ZEC fixture committed); `--live-frames --live-cmc` restore
@@ -70,9 +70,10 @@ installed — this is intentional and honest, not a silent failure.
 The agent can wire a **real** CoinMarketCap client into the live context path, gated
 on env config:
 
-- `MAGIC_AGENT_CMC_API_KEY` — CMC API key (required to enable the client).
-- `MAGIC_AGENT_CMC_BASE_URL` — optional base-URL override (defaults to
-  `https://pro-api.coinmarketcap.com`).
+- `CMC_API_KEY` — CoinMarketCap API key. Required for live mode (it is in
+  `_require_live_env`); `--live-cmc` wires the real `CoinMarketCapClient` from it, and
+  the build fails closed if it is absent. (The base URL `https://pro-api.coinmarketcap.com`
+  is a client default, not an env override in the live build path.)
 
 **Configured** (key present): a real authenticated client is wired in. On each context
 fetch it issues one GET (10s timeout) to the CMC Fear & Greed endpoint and **logs** the
