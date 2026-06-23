@@ -17,7 +17,12 @@ def test_runbook_has_supervised_live_canary_gate():
     assert "operator approval" in text
     assert "quote-only smoke" in text
     assert "confirmed and reconciled" in text
-    assert "do not enable systemd" in text
+    # Posture: the supervised single-cycle canary runs BEFORE the unattended loop.
+    # (The old "do not enable systemd" gating was stale — autonomy items #98 are
+    # DONE, so the unattended midas-agent.service loop is supported once the canary
+    # gate is green.)
+    assert "supervised single-cycle canary BEFORE" in text
+    assert "unattended `midas-agent.service` loop is supported" in text
 
 
 def test_runbook_documents_live_canary_to_scoring_process():

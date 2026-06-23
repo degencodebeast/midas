@@ -255,15 +255,19 @@ They do NOT block paper mode but are material for live operation.
 
 **(a) Live (`--executor twak --live-frames --live-cmc`) IS wired and signs real BSC swaps.**
 `cli._cmd_run()` assembles the full spot runtime app; both paper and live modes pace one
-cycle per closed H1 bar via the bar-close-aligned clock (no busy-spin). The live path
+cycle per closed H1 bar via the bar-close-aligned clock (`live.py`
+`make_bar_aligned_clock` — no busy-spin). The live path
 (scanner → RiskPolicy → TWAK coordinator → on-chain swap → reconcile) has been exercised
 end-to-end by a supervised canary on a funded BSC wallet, and is operator-gated (requires
-the live secrets + a funded wallet + explicit `--executor twak`). REMAINING live
-limitations before UNATTENDED operation: chain-position-rebuild on restart is not yet
-wired — a crash/restart or a cross-machine (local→VPS) handoff with an open position can
-re-enter, so run on ONE machine (or copy `.magic_agent/twak/`) until that lands; and sell
-idempotency on a lost-response edge is pending. Supervised single-cycle
-(`--max-iters 1`) live runs are safe; unattended looping needs those two items.
+the live secrets + a funded wallet + explicit `--executor twak`). The two former
+unattended-operation blockers are now **CLOSED**: sell idempotency is journal-guarded via
+`execution_coordinator.submit_sell` (stable id) routed through `live_exits.py`, and live
+startup rebuilds open-position truth from chain via `app.py`
+`rebuild_positions_from_chain(...)` (reconciled journal records reconciled against
+on-chain balances), NOT `position_store.load()` / `positions.json`. So a restart cannot
+re-enter a position already held on-chain, and a lost-response sell cannot re-broadcast a
+protective exit. Safety posture: run the supervised single-cycle canary
+(`--max-iters 1`) FIRST; once its gate is green, the unattended loop is supported.
 
 **(b) x402 budget hardening is pending.**
 The current `X402Client` enforces a per-request and daily budget, but it does NOT yet:
@@ -337,7 +341,10 @@ BROADCAST_UNKNOWN blocks all new exposure until resolved.
 
 ## Supervised live canary gate
 
-Do not enable systemd or run autonomous live mode before this gate is complete.
+Run this supervised single-cycle canary BEFORE enabling the unattended
+`midas-agent.service` loop. The autonomy blockers are closed (see § Known
+live-execution gaps), so the unattended `midas-agent.service` loop is supported — the
+canary is the mandatory safety gate that must pass first.
 
 Prerequisites:
 
@@ -369,35 +376,47 @@ Canary observation sequence:
 
 If any step fails, stop autonomous activation. Do not promote to normal scoring mode.
 
-### Known live-execution gaps (must close before funded/autonomous live)
+### Known live-execution gaps — CLOSED (autonomy items)
 
-The Phase 0 live wiring is fail-closed but incomplete. The supervised quote-only
-smoke above is safe (no funds move), but the following MUST be closed before any
-funded or unsupervised live run, and the systemd unit MUST stay disabled until then:
+The Phase 0 live wiring is fail-closed and the unattended-operation blockers are now
+**closed in code**. All three of the following are DONE:
 
-1. Real BSC RPC client — DONE. `build_app(mode="twak")` now defaults the
+1. Real BSC RPC client — DONE. `build_app(mode="twak")` defaults the
    receipt/confirmation port to the real `BscRpcClient` (`live_rpc.py`), which reads
    `BSC_RPC_URL` and queries the transaction receipt + confirmation depth over
    stdlib JSON-RPC. It fails closed: a receipt-poll timeout or RPC/transport error
    RAISES (never a fabricated `0x0` receipt), so the coordinator maps it to a
    `BROADCAST_UNKNOWN` (exposure-blocking) outcome. Construction is lazy (no chain
-   call until a cycle runs), so a funded canary can now book. The coordinator's
-   post-swap reads (confirmations + post balance snapshot + reconcile) are also now
+   call until a cycle runs), so a funded canary can book. The coordinator's
+   post-swap reads (confirmations + post balance snapshot + reconcile) are also
    guarded: a fault there returns `MINED` / `BROADCAST_UNKNOWN` (a non-terminal,
    exposure-blocking state) instead of crashing the cycle. Inject `live_rpc` only to
    override the default with a stub.
-2. Live sell idempotency. The TWAK sell path has no execution-journal idempotency
-   record; a sell broadcast whose response is lost must map to a safe terminal state
-   so a protective exit is not re-broadcast on the next cycle.
-3. Chain-truth restart rebuild. Live restart still loads the paper position store;
-   before unsupervised live operation, open-position truth must be rebuilt from
-   reconciled execution evidence + chain balances (`rebuild_positions_from_chain`)
-   instead of `positions.json`, so a restart cannot re-enter a position already held
-   on-chain.
+2. Live sell idempotency — DONE. The TWAK sell path is journal-guarded via
+   `execution_coordinator.submit_sell` (a stable, deterministic idempotency id from
+   `sell_intent_id_for(...)`), routed through `live_exits.py`. The journal's `create`
+   RAISES on a duplicate id, so a sell broadcast whose response is lost maps to a safe
+   terminal/`ALREADY_SUBMITTED` state — a protective exit is broadcast EXACTLY once and
+   is never re-broadcast on the next cycle.
+3. Chain-truth restart rebuild — DONE. Live startup (`app.py`) calls
+   `rebuild_positions_from_chain(...)` — open-position truth is rebuilt from reconciled
+   execution-journal buy records reconciled against current on-chain wallet balances
+   (the realized on-chain quantity is used as the position size), NOT
+   `position_store.load()` / `positions.json`. A position is rebuilt only when a
+   reconciled record exists AND the wallet still holds the token, so a restart cannot
+   re-enter a position already held on-chain. (Paper mode still uses
+   `position_store.load()`.)
 
-Until the remaining gaps are closed, operate only the supervised quote-only smoke and a single
-operator-watched canary; do not enable systemd (keep the unit disabled) and do not
-run autonomously.
+Posture: run the supervised quote-only smoke and a single operator-watched canary
+(`--max-iters 1`) FIRST. Once that gate is green, the unattended `midas-agent.service`
+loop is supported — both autonomy blockers above are closed.
+
+> **Honestly still deferred (do NOT enable as autonomy-complete):** x402-as-central
+> is deferred — production uses the direct CMC key via `CoinMarketCapClient`, not the
+> `CmcX402QuoteClient` path; the bounded LLM advisor is deferred (not wired); and a
+> Minor `TwakBalanceReader.held_tokens()` enumeration (for unmanaged-balance warnings
+> in `_warn_unmanaged_balances`) is a follow-up. None of these block the unattended
+> loop, but none should be claimed as done.
 
 ---
 

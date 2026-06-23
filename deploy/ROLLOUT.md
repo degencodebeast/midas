@@ -58,8 +58,11 @@ uv run magic-agent run --executor paper
 uv run magic-agent serve --host 127.0.0.1 --port 8000
 ```
 
-`--executor paper` runs `PaperExecutor(starting_equity=1000.0)` — sign-aware
-simulated PnL, no network calls, no funds.
+`--executor paper` wires `PaperExecutionAdapter` over a fresh paper session
+(`new_session`, default equity `_DEFAULT_STARTING_EQUITY = 10000`) under the
+`RiskConfig.defaults()` **fixed-MARGIN** model — sign-aware simulated PnL, no
+network calls, no funds. (Live sizes off the real wallet via `wallet_equity()`,
+not a hardcoded starting equity.)
 
 > **Per-mode paths:** paper writes `.magic_agent/paper/status.json` (and
 > `decisions.jsonl`). The serve unit must point `--status` at that path for Stage 1.
@@ -92,12 +95,14 @@ exit or throw an unhandled exception.
 
 ```bash
 stat /opt/midas/.magic_agent/paper/status.json
-# wait for at least one NEW CLOSED CANDLE (~5 min), then:
+# wait for at least one NEW CLOSED H1 BAR, then:
 stat /opt/midas/.magic_agent/paper/status.json
 ```
 
-**Cadence:** the loop polls every ~15 s but only writes new state when a **5-minute
-candle closes**. Allow up to ~5–6 minutes between the two checks.
+**Cadence:** the loop is paced to **closed H1 bars** by a bar-close-aligned clock
+(`live.py`) — it sleeps until the next H1 bar closes and writes new state once per
+closed H1 bar (no busy-spin, no sub-bar tick). Allow up to ~1 hour between the two
+checks.
 
 **Command (verify API surface):**
 
@@ -117,11 +122,11 @@ paper session with no simulated losses.
 
 ```bash
 wc -l /opt/midas/.magic_agent/paper/decisions.jsonl
-# wait for at least one new closed candle (~5 min), then:
+# wait for at least one new closed H1 bar, then:
 wc -l /opt/midas/.magic_agent/paper/decisions.jsonl
 ```
 
-**Expected result:** line count increases after at least one closed candle.
+**Expected result:** line count increases after at least one closed H1 bar.
 
 **Command (verify API surface):**
 
@@ -208,7 +213,7 @@ print('halted:', s.get('halted'), '| daily_loss:', s.get('daily_loss'), '| max_d
 value).
 
 To exercise the kill-switch: pass `--max-daily-loss 0.01` as a test-only flag; let
-the loop process one or more closed candles; confirm `halted: True` when the
+the loop process one or more closed H1 bars; confirm `halted: True` when the
 simulated daily loss exceeds the limit. Restore the real default before advancing.
 
 ---
@@ -311,21 +316,25 @@ If any step fails, stop. Do not promote to unattended loop.
 
 ## Stage 3 — Unattended live loop
 
-### 3.1 Pre-unattended caveats (from `docs/track1-spot-runbook.md` § Known limitations)
+### 3.1 Autonomy posture (from `docs/track1-spot-runbook.md` § Known limitations)
 
-Two items remain open before fully autonomous operation is safe:
+The two former unattended-operation blockers are now **CLOSED in code**:
 
-1. **Sell idempotency:** the TWAK sell path has no execution-journal idempotency record
-   for a lost-response edge. A sell broadcast whose response is lost must map to a safe
-   terminal state so a protective exit is not re-broadcast on the next cycle.
-2. **Chain-rebuild on restart:** live restart still loads the paper position store.
-   Before unsupervised operation, open-position truth must be rebuilt from reconciled
-   execution evidence + chain balances (`rebuild_positions_from_chain`) rather than
-   `positions.json`, so a restart cannot re-enter a position already held on-chain.
+1. **Sell idempotency — DONE.** The TWAK sell path is journal-guarded via
+   `execution_coordinator.submit_sell` (stable, deterministic idempotency id),
+   routed through `live_exits.py`. A sell broadcast whose response is lost maps to a
+   safe terminal/exposure-blocking state, so a protective exit is **not** re-broadcast
+   on the next cycle.
+2. **Chain-truth restart rebuild — DONE.** Live startup (`app.py`) calls
+   `rebuild_positions_from_chain(...)` — open-position truth is rebuilt from reconciled
+   execution-journal records reconciled against on-chain balances, **not** from
+   `position_store.load()` / `positions.json`. A restart therefore cannot re-enter a
+   position already held on-chain.
 
-Until both items are closed: run only on ONE machine; if you must move to a new
-machine or VPS, copy `.magic_agent/twak/` before restarting. **Supervised
-single-cycle live (`--max-iters 1`) is safe. Unattended looping requires both items.**
+Because both are closed, the unattended `midas-agent.service` loop is **supported**.
+**Safety gate:** run the supervised single-cycle canary (`--max-iters 1`, Stage 2)
+FIRST and clear its go/no-go gate; only then enable the unattended loop. State under
+`.magic_agent/twak/` still persists across restarts — keep it on durable storage.
 
 ### 3.2 Install and enable the canonical live unit
 

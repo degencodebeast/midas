@@ -103,3 +103,127 @@ def test_deploy_readme_uses_canonical_live_unit_and_per_mode_status():
     # executor", but must not instruct using one).
     assert "--executor aster" not in text
     assert "ASTER_" not in text
+
+
+# ---------------------------------------------------------------------------
+# Operator-doc drift guards.
+#
+# These read the committed operator docs (no network) and FAIL if a stale
+# claim reappears, or if a load-bearing correct fact disappears. They exist
+# because reviewers kept finding stale doc spots after targeted fixes:
+#   - cadence is paced to CLOSED H1 BARS (live.py bar-close-aligned clock),
+#     NOT a 5-minute candle / ~15s tick;
+#   - the paper runtime is fixed-margin off a 10000 default session (live
+#     sizes off the real wallet), NOT PaperExecutor(starting_equity=1000.0);
+#   - the canonical live unit is `--executor twak --live-frames --live-cmc`,
+#     there is no operational `--executor aster`;
+#   - autonomy items #98 are DONE: live sell idempotency (submit_sell) and
+#     chain-truth restart rebuild (rebuild_positions_from_chain) — so the
+#     "pending" phrasings must not reappear.
+#
+# Scoping note: a legitimate "there is no aster executor" / "x402 deferred"
+# mention must NOT trip these — only OPERATIONAL stale instructions are banned.
+# ---------------------------------------------------------------------------
+
+_OPERATOR_DOCS = (
+    "README.md",
+    "docs/track1-spot-runbook.md",
+    "deploy/ROLLOUT.md",
+    "deploy/README.md",
+)
+
+
+def _doc_text(name: str) -> str:
+    return Path(name).read_text()
+
+
+def test_operator_docs_have_no_stale_cadence_claim():
+    # Real cadence = one cycle per CLOSED H1 BAR (live.py bar-close-aligned
+    # clock). No 5-minute candle / ~15s tick wording may survive anywhere.
+    banned = ("5-minute", "5 min", "5-min", "every ~15 s", "every ~15s", "~15 s")
+    for name in _OPERATOR_DOCS:
+        text = _doc_text(name)
+        for token in banned:
+            assert token not in text, f"{name} still has stale cadence claim {token!r}"
+
+
+def test_rollout_states_closed_h1_cadence():
+    text = _doc_text("deploy/ROLLOUT.md")
+    assert "closed H1" in text, "ROLLOUT must state the closed-H1-bar cadence"
+
+
+def test_operator_docs_have_no_obsolete_paper_executor_shape():
+    # The real paper runtime is fixed-margin off a 10000 default session; live
+    # sizes off the wallet. The old PaperExecutor(starting_equity=1000.0) shape
+    # never existed in code and must not reappear in any doc.
+    banned = ("starting_equity=1000", "PaperExecutor(")
+    for name in _OPERATOR_DOCS:
+        text = _doc_text(name)
+        for token in banned:
+            assert token not in text, f"{name} still has obsolete paper shape {token!r}"
+
+
+def test_operator_docs_have_no_operational_aster_executor():
+    # A prose "there is no aster executor" note is fine; an operational
+    # `--executor aster` instruction is not. Also forbid the dead
+    # AsterRestExecutor as an operational reference — but the runbook keeps a
+    # grep-example asserting AsterRestExecutor is ABSENT, which is legitimate.
+    for name in _OPERATOR_DOCS:
+        text = _doc_text(name)
+        assert "--executor aster" not in text, f"{name} instructs --executor aster"
+
+
+def test_operator_docs_have_no_pending_autonomy_phrasings():
+    # Autonomy items #98 are DONE in code (submit_sell + rebuild_positions_from_chain).
+    # The exact stale "pending" phrasings must not reappear.
+    banned = (
+        "sell path has no execution-journal idempotency",
+        "still loads the paper position store",
+        "is not yet wired",
+        "chain-position-rebuild on restart is not yet",
+    )
+    for name in _OPERATOR_DOCS:
+        text = _doc_text(name)
+        for token in banned:
+            assert token not in text, f"{name} still has pending-autonomy phrasing {token!r}"
+
+
+def test_runbook_and_rollout_mark_autonomy_items_closed():
+    # The two #98 items must be described as DONE/CLOSED with the real mechanism.
+    runbook = _doc_text("docs/track1-spot-runbook.md")
+    rollout = _doc_text("deploy/ROLLOUT.md")
+    for text in (runbook, rollout):
+        assert "submit_sell" in text, "doc must cite submit_sell (sell idempotency DONE)"
+        assert "rebuild_positions_from_chain" in text
+    # The gate must no longer claim the code cannot run unattended.
+    assert "do not\nrun autonomously" not in runbook
+    assert "do not run autonomously" not in runbook.replace("\n", " ")
+    assert "keep the unit disabled" not in runbook
+
+
+def test_canonical_live_unit_phrasing_present_in_docs():
+    # The canonical live unit string must survive in every operator doc.
+    unit = "--executor twak --live-frames --live-cmc"
+    for name in _OPERATOR_DOCS:
+        assert unit in _doc_text(name), f"{name} missing canonical live unit {unit!r}"
+
+
+def test_operator_docs_keep_fixed_margin_markers():
+    # The fixed-margin risk model markers must remain (no stop-derived-sizing drift).
+    for name in ("README.md", "docs/track1-spot-runbook.md", "deploy/ROLLOUT.md"):
+        text = _doc_text(name)
+        assert "a_grade_margin_fraction = 0.05" in text or "A-grade margin | 5 %" in text, (
+            f"{name} missing fixed-margin A-grade marker"
+        )
+    # ROLLOUT and runbook must name the model explicitly.
+    assert "fixed-MARGIN" in _doc_text("deploy/ROLLOUT.md")
+    assert "FIXED-MARGIN" in _doc_text("docs/track1-spot-runbook.md")
+
+
+def test_deferred_items_stay_honestly_deferred_not_overclaimed():
+    # x402-as-central, the LLM advisor, and held_tokens() enumeration remain
+    # future work. Guard that the docs do not silently claim them DONE.
+    runbook = _doc_text("docs/track1-spot-runbook.md")
+    assert "x402 budget hardening is pending" in runbook
+    # The advisor stays OFF-by-default / deferred wording somewhere.
+    assert "deferred" in runbook
