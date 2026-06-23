@@ -793,7 +793,10 @@ def build_app(
         # Live protective exits: real TWAK sells. Detection (observe) stays
         # price-driven via the live frame source; only the sell quote/execute
         # are swapped to the real TWAK sell ports.
-        live_sell_ports = TwakSellPorts(twak=live_twak, book=position_manager.book, registry=registry)
+        live_sell_ports = TwakSellPorts(
+            twak=live_twak, book=position_manager.book, registry=registry,
+            coordinator=execution_port,
+        )
         position_manager.sell_probe = live_sell_ports.sell_probe
         position_manager.execute = live_sell_ports.execute
 

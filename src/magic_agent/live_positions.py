@@ -15,6 +15,53 @@ def _is_reconciled(record) -> bool:
     return state == "RECONCILED" or state is ExecutionState.RECONCILED
 
 
+# A protective-sell record in any of these states means the sell was at least
+# broadcast and (SUBMITTED+) is in flight or done — the position must be treated
+# as CLOSED even if the wallet snapshot hasn't settled yet, so a restart mid-exit
+# does NOT rebuild a just-sold position and re-drive its exit. EXECUTING/
+# INTENT_PERSISTED (pre-broadcast) and BROADCAST_UNKNOWN/REVERTED (no confirmed
+# sell) are deliberately EXCLUDED: those are not a known-closing sell, so the
+# position stays managed (fail closed toward keeping a position we may still hold).
+_CLOSING_SELL_STATES = frozenset({
+    ExecutionState.SUBMITTED.value,
+    ExecutionState.MINED.value,
+    ExecutionState.CONFIRMED.value,
+    ExecutionState.RECONCILED.value,
+})
+
+
+def _record_state_value(record) -> str | None:
+    state = getattr(record, "state", None)
+    if isinstance(state, ExecutionState):
+        return state.value
+    return state
+
+
+def _intents_with_closing_sell(records) -> set[str]:
+    """Collect buy intent_ids that have a closing protective-SELL record.
+
+    A protective sell is journaled under a STABLE id ``sell:{buy_intent_id}:...``
+    (see ``live_exits.sell_intent_id_for``) and carries ``evidence['side'] ==
+    'sell'``. Any sell record in a SUBMITTED-or-beyond state means the exit is in
+    flight or done, so the underlying buy intent's position is CLOSED.
+    """
+    closing: set[str] = set()
+    for record in records:
+        evidence = getattr(record, "evidence", {}) or {}
+        if not isinstance(evidence, dict) or evidence.get("side") != "sell":
+            continue
+        if _record_state_value(record) not in _CLOSING_SELL_STATES:
+            continue
+        sell_id = getattr(record, "intent_id", None) or ""
+        # ``sell:{buy_intent_id}:{reason}:{qty}`` -> recover the buy intent_id.
+        if sell_id.startswith("sell:"):
+            rest = sell_id[len("sell:"):]
+            buy_intent_id = rest.rsplit(":", 2)[0]
+            if buy_intent_id:
+                closing.add(buy_intent_id)
+    return closing
+
+
 def _record_intent_id(record) -> str | None:
     return getattr(record, "intent_id", None) or record.evidence.get("intent", {}).get("intent_id")
 
@@ -114,11 +161,23 @@ def rebuild_positions_from_chain(*, records, intents: dict[str, object], balance
     """
     rebuilt: list[ReconciledPosition] = []
     rebuilt_identity_keys: set[str] = set()
+    records = list(records)
+    # A position whose protective SELL is already broadcast (SUBMITTED+) / reconciled
+    # is CLOSED even if the wallet snapshot hasn't settled yet — exclude it so a
+    # restart mid-exit cannot rebuild a just-sold position and re-drive the exit.
+    closed_by_sell = _intents_with_closing_sell(records)
     for record in records:
         if not _is_reconciled(record):
             continue
         intent_id = _record_intent_id(record)
         if intent_id not in intents:
+            continue
+        if intent_id in closed_by_sell:
+            _log.info(
+                "dropping reconciled position %s: a protective sell is journaled "
+                "(submitted/reconciled); treating as closed",
+                intent_id,
+            )
             continue
         intent = intents[intent_id]
         setup = intent.setup

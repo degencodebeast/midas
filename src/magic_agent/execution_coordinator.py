@@ -22,7 +22,7 @@ from dataclasses import asdict
 from decimal import Decimal
 
 from magic_agent.execution_journal import ExecutionState
-from magic_agent.reconcile import reconcile_buy
+from magic_agent.reconcile import reconcile_buy, reconcile_sell
 from magic_agent.twak import TwakError
 
 _log = logging.getLogger(__name__)
@@ -118,4 +118,79 @@ class ExecutionCoordinator:
         self.journal.transition(intent.intent_id, ExecutionState.RECONCILED,
                                 post_balances=post, actual_qty=str(result.position_qty))
         self.positions.open_from_reconciliation(intent, result.position_qty)
+        return "RECONCILED"
+
+    def submit_sell(self, *, sell_intent_id: str, identity_key: str, contract: str,
+                    exit_quantity, evidence: dict | None = None) -> str:
+        """Idempotently broadcast + reconcile a protective SELL (token -> USDC).
+
+        Mirrors :meth:`submit_buy`'s idempotency machinery exactly, keyed on a
+        STABLE ``sell_intent_id`` derived by the caller from the position's
+        identity + exit reason (deterministic across restarts). The journal's
+        ``create`` RAISES if a record for ``sell_intent_id`` already exists, so a
+        re-attempt (lost response or a same-cycle / post-restart retry) never
+        re-broadcasts the sell — the swap is broadcast EXACTLY once.
+
+        Returns the terminal/intermediate outcome string (``RECONCILED``,
+        ``MINED``, ``REVERTED``, ``CONFIRMED_NOT_RECONCILED``, or
+        ``BROADCAST_UNKNOWN``). The caller mutates its book ONLY on
+        ``RECONCILED`` (sell-first-then-mutate ordering preserved): a position we
+        may still hold on-chain is never dropped on a non-reconciled outcome.
+
+        Note: ``create`` raising on a duplicate is the idempotency GUARD and is
+        intentionally NOT caught here — the caller (e.g. ``TwakSellPorts.execute``
+        under ``PositionManager.process_exits`` per-position isolation) treats the
+        raise as "already in flight / done; do not re-broadcast".
+        """
+        pre = self.balances.snapshot(identity_key)
+        self.journal.create(sell_intent_id, sell_intent_id, {
+            "side": "sell", "identity_key": identity_key,
+            "exit_quantity": str(exit_quantity), "pre_balances": pre,
+            **(evidence or {}),
+        })
+        self.journal.transition(sell_intent_id, ExecutionState.EXECUTING)
+        try:
+            payload = self.twak.json([
+                "swap", str(exit_quantity), contract, "USDC",
+                "--chain", "bsc", "--json",
+            ])
+            # A REAL executed sell returns the tx hash in the TOP-LEVEL "hash"
+            # field (mirrors the buy path); the data.tx_hash / tx_hash shapes are
+            # legacy fallbacks.
+            tx_hash = payload.get("hash") or payload.get("data", {}).get("tx_hash") or payload.get("tx_hash")
+            if not tx_hash:
+                raise TwakError("sell response missing transaction hash")
+        except Exception as exc:
+            _log.warning("sell broadcast outcome unknown: %s", exc)
+            self.journal.transition(
+                sell_intent_id, ExecutionState.BROADCAST_UNKNOWN, error=str(exc),
+            )
+            return "BROADCAST_UNKNOWN"
+        self.journal.transition(sell_intent_id, ExecutionState.SUBMITTED, tx_hash=tx_hash)
+        try:
+            receipt = self.rpc.wait_receipt(tx_hash)
+        except Exception as exc:
+            _log.warning("sell receipt wait failed; broadcast outcome unknown: %s", exc)
+            self.journal.transition(
+                sell_intent_id, ExecutionState.BROADCAST_UNKNOWN, error=str(exc),
+            )
+            return "BROADCAST_UNKNOWN"
+        self.journal.transition(sell_intent_id, ExecutionState.MINED, receipt=receipt)
+        try:
+            confirmations = self.rpc.confirmations(receipt)
+            post = self.balances.snapshot(identity_key)
+            result = reconcile_sell(
+                receipt=receipt, confirmations=confirmations,
+                required_confirmations=self.required_confirmations,
+                stable_before=pre["stable"], stable_after=post["stable"],
+                token_before=pre["token"], token_after=post["token"],
+            )
+        except Exception:
+            _log.exception("post-MINED sell reconcile read failed; returning MINED (fail closed)")
+            return "MINED"
+        if result.state != "RECONCILED":
+            return result.state
+        self.journal.transition(sell_intent_id, ExecutionState.CONFIRMED)
+        self.journal.transition(sell_intent_id, ExecutionState.RECONCILED,
+                                post_balances=post, actual_qty=str(result.position_qty))
         return "RECONCILED"

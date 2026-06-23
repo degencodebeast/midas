@@ -417,3 +417,67 @@ def test_idempotent_rerun_does_not_double_submit_or_double_book(tmp_path):
         coord.submit(intent, quote={"price": "1"}, policy=PolicyConfig(max_notional=1000.0))
     assert len(positions.calls) == 1
     assert len(twak.calls) == 1
+
+
+def test_submit_sell_reconciles_on_token_down_stable_up(tmp_path):
+    # A protective SELL reconciles when the token balance falls and stable rises.
+    twak = FakeTwak(payload={"hash": "0xsell", "priceImpact": "0"})
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("0"), "token": Decimal("95")},   # pre-sell
+        {"stable": Decimal("90"), "token": Decimal("0")},   # post-sell
+    ])
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    out = coord.submit_sell(
+        sell_intent_id="sell:intent-1:stop:95", identity_key="zec-bsc",
+        contract="0xCONTRACT", exit_quantity=Decimal("95"),
+    )
+
+    assert out == "RECONCILED"
+    # Sell swap is token contract -> USDC, NOT USDC -> token.
+    assert twak.calls == [["swap", "95", "0xCONTRACT", "USDC", "--chain", "bsc", "--json"]]
+    record = journal.get("sell:intent-1:stop:95")
+    assert record.state is ExecutionState.RECONCILED
+    assert record.evidence.get("tx_hash") == "0xsell"
+    # A sell books NO new position.
+    assert positions.calls == []
+
+
+def test_submit_sell_idempotent_replay_raises_and_does_not_rebroadcast(tmp_path):
+    twak = FakeTwak(payload={"hash": "0xsell", "priceImpact": "0"})
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("0"), "token": Decimal("95")},
+        {"stable": Decimal("90"), "token": Decimal("0")},
+    ])
+    positions = SpyPositions()
+    coord, _journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    coord.submit_sell(sell_intent_id="sell:x:stop:1", identity_key="zec-bsc",
+                      contract="0xCONTRACT", exit_quantity=Decimal("1"))
+    assert len(twak.calls) == 1
+
+    with pytest.raises(ValueError):
+        coord.submit_sell(sell_intent_id="sell:x:stop:1", identity_key="zec-bsc",
+                          contract="0xCONTRACT", exit_quantity=Decimal("1"))
+    assert len(twak.calls) == 1  # no second broadcast
+
+
+def test_submit_sell_confirmed_not_reconciled_on_wrong_delta(tmp_path):
+    # Confirmed receipt but token did NOT fall (stale/failed transfer) -> fail closed.
+    twak = FakeTwak(payload={"hash": "0xsell", "priceImpact": "0"})
+    rpc = FakeRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    balances = FakeBalances([
+        {"stable": Decimal("0"), "token": Decimal("95")},
+        {"stable": Decimal("0"), "token": Decimal("95")},  # no delta
+    ])
+    positions = SpyPositions()
+    coord, journal = _coordinator(tmp_path, twak=twak, rpc=rpc, balances=balances, positions=positions)
+
+    out = coord.submit_sell(sell_intent_id="sell:y:stop:1", identity_key="zec-bsc",
+                            contract="0xCONTRACT", exit_quantity=Decimal("1"))
+
+    assert out == "CONFIRMED_NOT_RECONCILED"
+    assert journal.get("sell:y:stop:1").state is ExecutionState.MINED

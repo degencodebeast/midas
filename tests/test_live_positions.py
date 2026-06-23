@@ -130,3 +130,64 @@ def test_unmanaged_on_chain_balance_is_warned_and_left_out(caplog):
     assert [p.identity_key for p in rebuilt] == ["0xtoken-a"]
     warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
     assert any("unmanaged on-chain balance" in m and "0xtoken-c" in m for m in warnings)
+
+
+def _sell_record(buy_intent_id, state="RECONCILED", reason="stop", qty="3"):
+    """A protective-sell journal record keyed sell:{buy_intent_id}:{reason}:{qty}."""
+    return type("Record", (), {
+        "intent_id": f"sell:{buy_intent_id}:{reason}:{qty}",
+        "state": state,
+        "evidence": {"side": "sell", "identity_key": "0xtoken"},
+    })()
+
+
+def test_position_with_reconciled_sell_record_is_not_rebuilt(caplog):
+    # A reconciled BUY whose token STILL shows on the wallet snapshot but which has
+    # a RECONCILED protective-SELL record must be treated as CLOSED (a restart
+    # mid-exit must not rebuild a just-sold position and re-drive the exit).
+    setup = AuthorizedSetup.example(identity_key="0xtoken", symbol="ZEC/USDT")
+    intent = SpotIntent("intent-1", setup, Decimal("3"), "buy", ActionPurpose.STRATEGY)
+    buy_record = _reconciled_record(intent)
+    sell_record = _sell_record("intent-1", state="RECONCILED")
+
+    with caplog.at_level(logging.INFO, logger="magic_agent.live_positions"):
+        rebuilt = rebuild_positions_from_chain(
+            records=[buy_record, sell_record],
+            intents={"intent-1": intent},
+            balances=FakeBalances(Decimal("3")),  # wallet STILL shows the token
+        )
+
+    assert rebuilt == []  # excluded despite a positive wallet balance
+    assert any("protective sell is journaled" in r.message for r in caplog.records)
+
+
+def test_position_with_submitted_sell_record_is_not_rebuilt():
+    # A SUBMITTED (in-flight, not yet reconciled) sell still closes the position.
+    setup = AuthorizedSetup.example(identity_key="0xtoken", symbol="ZEC/USDT")
+    intent = SpotIntent("intent-1", setup, Decimal("3"), "buy", ActionPurpose.STRATEGY)
+    buy_record = _reconciled_record(intent)
+    sell_record = _sell_record("intent-1", state="SUBMITTED")
+
+    rebuilt = rebuild_positions_from_chain(
+        records=[buy_record, sell_record],
+        intents={"intent-1": intent},
+        balances=FakeBalances(Decimal("3")),
+    )
+
+    assert rebuilt == []
+
+
+def test_position_with_broadcast_unknown_sell_is_still_rebuilt():
+    # A BROADCAST_UNKNOWN sell is NOT a confirmed close; the position stays managed.
+    setup = AuthorizedSetup.example(identity_key="0xtoken", symbol="ZEC/USDT")
+    intent = SpotIntent("intent-1", setup, Decimal("3"), "buy", ActionPurpose.STRATEGY)
+    buy_record = _reconciled_record(intent)
+    sell_record = _sell_record("intent-1", state="BROADCAST_UNKNOWN")
+
+    rebuilt = rebuild_positions_from_chain(
+        records=[buy_record, sell_record],
+        intents={"intent-1": intent},
+        balances=FakeBalances(Decimal("3")),
+    )
+
+    assert [p.intent_id for p in rebuilt] == ["intent-1"]

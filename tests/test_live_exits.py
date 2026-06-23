@@ -193,3 +193,164 @@ def test_sell_probe_fails_closed_on_nonpositive_quantity():
     assert quote.approved is False
     assert "nonpositive_exit_quantity" in quote.reasons
     assert twak.calls == []
+
+
+# ----------------------------------------------------------------------------
+# Idempotent protective sells via the ExecutionCoordinator (Part A).
+# ----------------------------------------------------------------------------
+from magic_agent.execution_coordinator import ExecutionCoordinator
+from magic_agent.execution_journal import ExecutionJournal, ExecutionState
+from magic_agent.live_exits import sell_intent_id_for
+
+
+class SellTwak:
+    """Execute returns a real top-level hash; counts the broadcast swaps."""
+
+    def __init__(self, hash_value="0xsellhash"):
+        self.calls = []
+        self._hash = hash_value
+
+    def json(self, args, *, timeout=60):
+        self.calls.append(args)
+        if "--quote-only" in args:
+            return _sell_quote_payload()
+        return {
+            "output": "1 USDC", "minReceived": "0.99 USDC",
+            "priceImpact": "0", "hash": self._hash,
+        }
+
+    @property
+    def execute_calls(self):
+        return [a for a in self.calls if "--quote-only" not in a]
+
+
+class SellRpc:
+    def __init__(self, *, receipt, confirmations):
+        self._receipt = receipt
+        self._confirmations = confirmations
+
+    def wallet_nonce(self):
+        return 1
+
+    def wait_receipt(self, tx_hash):
+        return self._receipt
+
+    def confirmations(self, receipt):
+        return self._confirmations
+
+
+class SellBalances:
+    """Token down, stable up across the sell (a reconcilable sell)."""
+
+    def __init__(self):
+        self._snaps = [
+            {"stable": Decimal("0"), "token": Decimal("2")},   # pre
+            {"stable": Decimal("5"), "token": Decimal("0")},   # post
+        ]
+        self._i = 0
+
+    def snapshot(self, identity_key):
+        snap = self._snaps[min(self._i, len(self._snaps) - 1)]
+        self._i += 1
+        return dict(snap)
+
+
+def _sell_coordinator(tmp_path, *, twak, rpc=None, balances=None):
+    journal = ExecutionJournal(tmp_path / "exec.json")
+    rpc = rpc or SellRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=2)
+    coord = ExecutionCoordinator(
+        twak=twak, rpc=rpc, balances=balances or SellBalances(),
+        journal=journal, positions=SimpleNamespace(), registry=None,
+        required_confirmations=2,
+    )
+    return coord, journal
+
+
+def _coord_ports(twak, book, coord):
+    return TwakSellPorts(twak=twak, book=book, registry=FakeRegistry({"zec-bsc": _APE}),
+                         coordinator=coord, chain="bsc")
+
+
+def test_stable_sell_intent_id_is_deterministic_across_restart():
+    position = _position()
+    decision = SimpleNamespace(exit_quantity=Decimal("2"), reason="stop")
+    a = sell_intent_id_for(position, decision)
+    b = sell_intent_id_for(position, decision)
+    assert a == b
+    assert a == "sell:intent-1:stop:2"
+
+
+def test_protective_sell_broadcasts_exactly_once_on_retry(tmp_path):
+    # A sell that broadcasts, then is RE-attempted with the SAME position/intent
+    # (lost response / same-cycle retry): the journal blocks the second broadcast.
+    twak = SellTwak()
+    coord, journal = _sell_coordinator(tmp_path, twak=twak)
+    position = _position()
+    book = [position]
+    ports = _coord_ports(twak, book, coord)
+    decision = SimpleNamespace(exit_quantity=Decimal("2"), reason="stop")
+
+    out1 = ports.execute(position, decision, quote=None)
+    assert out1 == "RECONCILED"
+    assert len(twak.execute_calls) == 1
+    assert book == []  # full close mutated on RECONCILED
+
+    # Re-attempt the same exit (position re-detected on retry): blocked, no 2nd swap.
+    sell_id = sell_intent_id_for(position, decision)
+    out2 = ports.execute(position, decision, quote=None)
+    assert out2 == "ALREADY_SUBMITTED"
+    assert len(twak.execute_calls) == 1  # EXACTLY ONCE — no double-sell
+    assert journal.get(sell_id).state is ExecutionState.RECONCILED
+
+
+def test_restart_mid_exit_does_not_rebroadcast(tmp_path):
+    # A sell intent journaled SUBMITTED (receipt not yet confirmed), then a restart
+    # runs process_exits again: the stable id sees the existing record -> no re-broadcast.
+    twak = SellTwak()
+    # confirmations < required -> stays MINED (in flight, not reconciled).
+    rpc = SellRpc(receipt={"status": "0x1", "blockNumber": "0x10"}, confirmations=0)
+    coord, journal = _sell_coordinator(tmp_path, twak=twak, rpc=rpc)
+    position = _position()
+    book = [position]
+    ports = _coord_ports(twak, book, coord)
+    decision = SimpleNamespace(exit_quantity=Decimal("2"), reason="stop")
+
+    out1 = ports.execute(position, decision, quote=None)
+    assert out1 == "MINED"
+    assert len(twak.execute_calls) == 1
+    assert book == [position]  # NOT reconciled -> book untouched (no fabricated mutation)
+
+    # Restart: the same exit is re-driven; the existing record blocks a 2nd broadcast.
+    out2 = ports.execute(position, decision, quote=None)
+    assert out2 == "ALREADY_SUBMITTED"
+    assert len(twak.execute_calls) == 1
+    assert book == [position]
+
+
+def test_broadcast_unknown_sell_no_double_sell_no_fabricated_mutation(tmp_path):
+    # A lost-response sell (no tx hash) -> BROADCAST_UNKNOWN recorded, book untouched,
+    # and a next-cycle retry does NOT re-broadcast.
+    class NoHashTwak(SellTwak):
+        def json(self, args, *, timeout=60):
+            self.calls.append(args)
+            if "--quote-only" in args:
+                return _sell_quote_payload()
+            return {"output": "1 USDC"}  # no hash -> BROADCAST_UNKNOWN
+
+    twak = NoHashTwak()
+    coord, journal = _sell_coordinator(tmp_path, twak=twak)
+    position = _position()
+    book = [position]
+    ports = _coord_ports(twak, book, coord)
+    decision = SimpleNamespace(exit_quantity=Decimal("2"), reason="stop")
+
+    out1 = ports.execute(position, decision, quote=None)
+    assert out1 == "BROADCAST_UNKNOWN"
+    assert book == [position]  # no fabricated book mutation
+    sell_id = sell_intent_id_for(position, decision)
+    assert journal.get(sell_id).state is ExecutionState.BROADCAST_UNKNOWN
+
+    out2 = ports.execute(position, decision, quote=None)
+    assert out2 == "ALREADY_SUBMITTED"
+    assert len(twak.execute_calls) == 1  # no double-sell
+    assert book == [position]
