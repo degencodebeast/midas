@@ -477,11 +477,16 @@ Production wiring against the `ERC8004Agent` SDK API is **pending**. Even with t
 `[identity]` extra installed and all three `MAGIC_AGENT_ERC8004_*` env vars set, the
 dashboard will show `unregistered`. This is not a blocker for trading.
 
-### CMC context (OBSERVE-ONLY)
+### CMC universe data (`--live-cmc`)
 
-CMC Fear & Greed / rank data is fetched and logged when configured. CMC does NOT gate
-trades — the deterministic scanner path is authoritative. "CMC unavailable" is a full
-passthrough (no veto, no boost).
+In live mode `CoinMarketCapClient` fetches `GET /v2/cryptocurrency/quotes/latest` (by CMC
+symbol, disambiguated by the BSC contract address) and feeds rank + 7d/30d momentum into
+`CmcCandidateSource`. This **does shape the scan**: it ranks momentum and **excludes**
+unresolvable symbols (`cmc_missing`, ambiguous-symbol, stale) from the live universe, and
+supplies the momentum the RiskPolicy counter-bias gate reads. CMC is **observe / veto /
+rank only** — it never *authorizes* a setup (the scanner is the sole setup authority).
+Fail-**soft** on a transient fetch error (affected symbols are skipped that cycle, momentum
+never fabricated), but `CMC_API_KEY` is **required** at live startup (fail-closed).
 
 ### LLM advisor (OPTIONAL, OFF BY DEFAULT)
 

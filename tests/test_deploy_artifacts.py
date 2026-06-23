@@ -257,3 +257,16 @@ def test_readme_uses_correct_live_cmc_env_and_no_stale_test_count():
     assert "CoinMarketCapClient" in readme
     assert "/v2/cryptocurrency/quotes/latest" in readme
     assert "cmc_missing" in readme  # the real client excludes symbols from the scan
+
+
+def test_no_operator_doc_describes_cmc_as_obsolete_observe_only_fear_greed():
+    # The live CMC client ranks momentum + EXCLUDES symbols from the scan and is
+    # fail-closed on a missing key. The old "Fear & Greed / observe-only / does NOT
+    # gate" prose was wrong and appeared in BOTH README and ROLLOUT — ban it in every
+    # operator doc. (The LLM-advisor's legitimate observe-only/returns-None prose uses
+    # the word "advisor", not "CMC", so it is unaffected.)
+    banned = ("Fear & Greed", "Fear and Greed", "CMC does NOT gate", "CMC context (OBSERVE-ONLY)")
+    for name in _OPERATOR_DOCS:
+        text = _doc_text(name)
+        for token in banned:
+            assert token not in text, f"{name} still has obsolete CMC prose {token!r}"
