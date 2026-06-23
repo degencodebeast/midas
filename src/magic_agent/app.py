@@ -58,6 +58,10 @@ from magic_agent.execution_journal import ExecutionJournal, ExecutionState
 from magic_agent.frames import FixtureFrameSource, GateioFrameSource
 from magic_agent.live_balances import TwakBalanceReader
 from magic_agent.live_exits import TwakSellPorts
+from magic_agent.live_positions import (
+    intents_from_journal,
+    rebuild_positions_from_chain,
+)
 from magic_agent.live_quotes import TwakQuoteProvider
 from magic_agent.identity_registry import IdentityRegistry
 from magic_agent.lifecycle import LifecycleEvaluator
@@ -697,13 +701,33 @@ def build_app(
         sell_probe=lambda position, quantity: None,  # rebound below.
         execute=lambda *args: None,  # rebound below.
     )
-    # Restore any open positions persisted before a restart INTO the book, BEFORE
-    # wiring open_positions below — so the restored open count is visible to the next
-    # cycle's concurrency cap (blocks re-entry) and the restored positions are a
-    # complete exit source (they carry quantity + stressed_loss_per_unit + the exit
-    # geometry: symbol/stop/campaign_dol). A corrupt store raises IntegrityError here
-    # (fail closed — no empty-book re-entry).
-    position_manager.book = position_store.load()
+    # Restore the open position book BEFORE wiring open_positions below — so the
+    # restored open count is visible to the next cycle's concurrency cap (blocks
+    # re-entry) and the restored positions are a complete exit source (they carry
+    # quantity + stressed_loss_per_unit + the exit geometry: symbol/stop/campaign_dol).
+    #
+    # LIVE (twak) mode: the open book is rebuilt from CHAIN TRUTH, NOT positions.json.
+    # Trusting the local positions.json on a live restart (or a local->VPS handoff)
+    # could re-enter or mismanage an already-held on-chain position. Instead we cross
+    # the reconciled execution-journal buy records (which carry entry/stop/target/qty
+    # + identity) against the CURRENT on-chain wallet balances: a position is rebuilt
+    # only when a reconciled record exists AND the wallet still holds that token (using
+    # the realized on-chain qty). Journal positions no longer held are dropped; held
+    # tokens with no journal record are logged (unmanaged) and left out of the book.
+    # The chain/balance read fails CLOSED (propagates) — NO positions.json fallback.
+    # positions.json remains a per-cycle cache/audit (run_cycle still saves it), but it
+    # is no longer the live startup source of truth.
+    #
+    # PAPER mode is unchanged: restore from positions.json (a corrupt store raises
+    # IntegrityError here — fail closed, no empty-book re-entry).
+    if live_mode:
+        position_manager.book = rebuild_positions_from_chain(
+            records=list(chain_journal.records.values()),
+            intents=intents_from_journal(chain_journal.records.values()),
+            balances=balances,
+        )
+    else:
+        position_manager.book = position_store.load()
 
     # Bind the price-driven paper exit ports to the (now-restored) book and the frame
     # source. ``observe`` reads the position's current price bar to detect a stop /

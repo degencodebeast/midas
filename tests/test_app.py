@@ -810,6 +810,180 @@ def test_live_after_entry_missing_sell_quote_fails_closed(tmp_path, monkeypatch)
     assert app.state.promotion_reason == "cost_viability_failed"
 
 
+def _live_balances_per_token(holdings, *, equity_usd=Decimal("999"), cash_usd=Decimal("999"), held=None):
+    """A live-balances stub whose snapshot is keyed by identity_key (so different
+    tokens report different on-chain holdings), with the wallet_equity surface
+    build_app(mode="twak") reads at startup, and an optional held_tokens()
+    enumeration for the unmanaged-balance check."""
+    def snapshot(identity_key):
+        return {"stable": "999", "token": str(holdings.get(identity_key, Decimal("0")))}
+
+    ns = SimpleNamespace(
+        snapshot=snapshot,
+        wallet_equity=lambda: {"equity_usd": equity_usd, "cash_usd": cash_usd},
+    )
+    if held is not None:
+        ns.held_tokens = lambda: held
+    return ns
+
+
+def _write_reconciled_buy(base, *, intent_id, identity_key, symbol, actual_qty):
+    """Persist a RECONCILED buy record (with full intent geometry in evidence) to the
+    twak execution journal on disk, simulating a real pre-restart reconciled entry."""
+    from magic_agent.execution_journal import ExecutionJournal, ExecutionState
+    from magic_agent.spot_models import ActionPurpose, SpotIntent
+
+    base.mkdir(parents=True, exist_ok=True)
+    journal = ExecutionJournal(base / "executions.json")
+    setup = AuthorizedSetup.example(identity_key=identity_key, symbol=symbol)
+    intent = SpotIntent(intent_id, setup, Decimal("5"), "buy", ActionPurpose.STRATEGY)
+    from dataclasses import asdict
+
+    journal.create(intent_id, intent_id, {"intent": asdict(intent)})
+    journal.transition(intent_id, ExecutionState.EXECUTING)
+    journal.transition(intent_id, ExecutionState.SUBMITTED, tx_hash="0xtx")
+    journal.transition(intent_id, ExecutionState.MINED, receipt={"status": "0x1"})
+    journal.transition(intent_id, ExecutionState.CONFIRMED)
+    journal.transition(intent_id, ExecutionState.RECONCILED, actual_qty=str(actual_qty))
+    return setup
+
+
+def test_build_app_twak_rebuilds_open_book_from_chain_not_positions_json(tmp_path, monkeypatch):
+    # CHAIN-TRUTH restart rebuild. A reconciled buy for TOKEN_A exists in the execution
+    # journal AND the wallet still holds TOKEN_A -> the open book must be rebuilt from
+    # CHAIN TRUTH (journal geometry + on-chain qty), NOT from positions.json. Prove the
+    # chain rebuild WINS by seeding positions.json with a DIFFERENT (bogus) position.
+    from magic_agent.position_store import PositionStore
+    from magic_agent.position_manager import ReconciledPosition
+
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    _write_reconciled_buy(
+        base, intent_id="intent-A", identity_key="zec-bsc",
+        symbol="ZEC/USDT", actual_qty=Decimal("3.5"),
+    )
+    # Seed positions.json with a DIFFERENT position — if the rebuild trusted this file
+    # the book would carry "intent-BOGUS", which the assertions below forbid.
+    PositionStore(base / "positions.json").save([
+        ReconciledPosition("intent-BOGUS", Decimal("999"), Decimal("1"),
+                           symbol="BOGUS/USDT", identity_key="bogus",
+                           entry=Decimal("2"), stop=Decimal("1"), campaign_dol=Decimal("3")),
+    ])
+
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_live_balances_per_token({"zec-bsc": Decimal("3.5")}),
+    )
+
+    book = app.position_manager.book
+    assert len(book) == 1, "expected exactly the chain-truth position (not the bogus file one)"
+    position = book[0]
+    assert position.intent_id == "intent-A"
+    assert position.identity_key == "zec-bsc"
+    # Strategy levels come from the journal record's setup.
+    assert position.entry == Decimal("100")
+    assert position.stop == Decimal("90")
+    assert position.campaign_dol == Decimal("120")
+    # Quantity is the REALIZED on-chain qty (chain truth), not positions.json's 999.
+    assert position.quantity == Decimal("3.5")
+    # The bogus positions.json position never entered the live book.
+    assert all(p.intent_id != "intent-BOGUS" for p in book)
+
+
+def test_build_app_twak_drops_journal_position_no_longer_held_on_chain(tmp_path, monkeypatch):
+    # A reconciled buy for TOKEN_B exists in the journal, but the wallet NO LONGER holds
+    # TOKEN_B (sold/exited out-of-band) -> TOKEN_B is DROPPED (not in the rebuilt book).
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    _write_reconciled_buy(
+        base, intent_id="intent-B", identity_key="zec-bsc",
+        symbol="ZEC/USDT", actual_qty=Decimal("3.5"),
+    )
+
+    app = build_app(
+        mode="twak",
+        root_dir=tmp_path,
+        scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+        cmc_client=FixtureCmcClient(),
+        frame_source=SimpleNamespace(),
+        twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+        live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+        live_balances=_live_balances_per_token({"zec-bsc": Decimal("0")}),  # no longer held
+    )
+
+    assert app.position_manager.book == []
+
+
+def test_build_app_twak_warns_on_unmanaged_on_chain_balance(tmp_path, monkeypatch, caplog):
+    # A wallet holding TOKEN_C with NO journal record -> not in the strategy book, and a
+    # WARNING is logged (operator visibility). Here the journal is EMPTY but the wallet
+    # holds an unknown token.
+    import logging
+
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    base.mkdir(parents=True, exist_ok=True)
+
+    with caplog.at_level(logging.WARNING, logger="magic_agent.live_positions"):
+        app = build_app(
+            mode="twak",
+            root_dir=tmp_path,
+            scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+            cmc_client=FixtureCmcClient(),
+            frame_source=SimpleNamespace(),
+            twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+            live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+            live_balances=_live_balances_per_token(
+                {}, held=[{"identity_key": "token-c", "quantity": Decimal("7")}],
+            ),
+        )
+
+    assert app.position_manager.book == []
+    warnings = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("unmanaged on-chain balance" in m and "token-c" in m for m in warnings)
+
+
+def test_build_app_twak_fails_closed_when_chain_balance_read_raises_at_book_rebuild(tmp_path, monkeypatch):
+    # Live chain-read failure during the book rebuild -> fail closed (propagate), NO
+    # positions.json fallback (that silent fallback is the bug being removed).
+    from magic_agent.twak import TwakError
+
+    _twak_env(monkeypatch)
+    base = tmp_path / ".magic_agent" / "twak"
+    _write_reconciled_buy(
+        base, intent_id="intent-D", identity_key="zec-bsc",
+        symbol="ZEC/USDT", actual_qty=Decimal("3.5"),
+    )
+
+    def _snapshot_raises(identity_key):
+        raise TwakError("chain balance read failed")
+
+    bad_balances = SimpleNamespace(
+        snapshot=_snapshot_raises,
+        # wallet_equity must succeed so we reach the book rebuild (the equity read is
+        # a separate, earlier startup concern already covered by its own fail-closed test).
+        wallet_equity=lambda: {"equity_usd": Decimal("999"), "cash_usd": Decimal("999")},
+    )
+
+    with pytest.raises(TwakError):
+        build_app(
+            mode="twak",
+            root_dir=tmp_path,
+            scanner_gateway=SimpleNamespace(scan=lambda candidate: None),
+            cmc_client=FixtureCmcClient(),
+            frame_source=SimpleNamespace(),
+            twak_runner=SimpleNamespace(json=lambda args, timeout=60: {}),
+            live_rpc=SimpleNamespace(wallet_nonce=lambda: 1, wait_receipt=lambda tx: {"status": "0x1"}, confirmations=lambda receipt: 2),
+            live_balances=bad_balances,
+        )
+
+
 def test_build_app_twak_fresh_session_sizes_off_wallet_equity(tmp_path, monkeypatch):
     # FIX A: a fresh live session must size off the REAL wallet, NOT the $10k paper
     # default. equity = native USD + USDC; cash = USDC (deployable stable).
