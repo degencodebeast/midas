@@ -59,8 +59,8 @@ uv run magic-agent serve --host 127.0.0.1 --port 8000
 On-chain identity is **opt-in** and independent of the trading path. Without it the
 dashboard shows `unregistered` — `cli._resolve_agent_id()` returns `None` when
 the SDK is absent or unconfigured, and never fabricates an id. (Identity does not
-gate the runtime; paper mode is now runnable — see Current status. Live mode remains
-a stub pending live wiring.)
+gate the runtime; paper mode is runnable and live mode (`--executor twak`) is wired and
+signs real BSC swaps — see Current status.)
 
 ```bash
 uv sync --extra identity            # or: pip install 'magic-agent[identity]'
